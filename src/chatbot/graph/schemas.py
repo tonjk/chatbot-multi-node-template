@@ -1,0 +1,58 @@
+"""Validated contracts at model and graph boundaries."""
+
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
+
+from langchain_core.messages import BaseMessage
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from chatbot.memory.schemas import MemoryCandidate
+
+RouteName = Literal["chat", "retrieve", "tools"]
+ToolName = Literal["calculator", "current_time", "knowledge_search"]
+
+
+class RouteDecision(BaseModel):
+    """Structured router output with consistent tool fields."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    route: RouteName
+    tool_name: ToolName | None
+    tool_input: str | None = Field(max_length=500)
+
+    @model_validator(mode="after")
+    def validate_tool_fields(self) -> "RouteDecision":
+        if self.route == "tools":
+            if self.tool_name is None:
+                raise ValueError("Tool routes require a tool name")
+            if self.tool_name != "current_time" and not (self.tool_input or "").strip():
+                raise ValueError("This tool route requires tool input")
+        elif self.tool_name is not None or self.tool_input is not None:
+            raise ValueError("Only tool routes may include tool fields")
+        return self
+
+    def as_tool_arguments(self) -> dict[str, str]:
+        if self.tool_name == "calculator":
+            return {"expression": self.tool_input or ""}
+        if self.tool_name == "current_time":
+            return {"timezone": self.tool_input or "UTC"}
+        if self.tool_name == "knowledge_search":
+            return {"query": self.tool_input or ""}
+        return {}
+
+
+class ModelGateway(Protocol):
+    """Boundary around all provider calls so tests never need a real model."""
+
+    def decide_route(self, message: str) -> RouteDecision | dict[str, Any]: ...
+
+    def generate(self, messages: list[BaseMessage]) -> str: ...
+
+    def extract_memory(self, message: str) -> MemoryCandidate | dict[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ChatResult:
+    response: str
+    route: RouteName

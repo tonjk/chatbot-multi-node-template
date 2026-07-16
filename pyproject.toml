@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chatbot-multi-node-template"
+version = "0.1.0"
+description = "A secure multi-node LangGraph chatbot template with FastAPI."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "bcrypt>=4.3,<5",
+  "fastapi>=0.116,<1",
+  "langchain>=1.0,<2.0",
+  "langchain-chroma>=1.0,<2.0",
+  "langchain-core>=1.0,<2.0",
+  "langchain-openai>=1.0,<2.0",
+  "langchain-text-splitters>=1.0,<2.0",
+  "langgraph>=1.0,<2.0",
+  "langgraph-checkpoint-postgres>=3.0,<4.0",
+  "langgraph-checkpoint-sqlite>=3.1,<4.0",
+  "psycopg[binary,pool]>=3.2,<4",
+  "pydantic>=2.13,<3",
+  "pydantic-settings>=2.10,<3",
+  "pyjwt>=2.10,<3",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+chatbot = "chatbot.cli:main"
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.7,<3",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chatbot"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"

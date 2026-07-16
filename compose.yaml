@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: chatbot
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://chatbot:${POSTGRES_PASSWORD}@postgres:5432/chatbot
+      CHROMA_PERSIST_DIRECTORY: /app/.data/chroma
+      KNOWLEDGE_DIRECTORY: /app/knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/app/.data
+      - ./knowledge:/app/knowledge:ro
+
+volumes:
+  postgres-data:
+  chroma-data:
+

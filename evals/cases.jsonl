@@ -1,0 +1,7 @@
+{"id":"general-greeting","message":"Hello, how are you?","expected_route":"chat","memory_consent":false}
+{"id":"knowledge-memory","message":"How does durable memory consent work in this project?","expected_route":"retrieve","memory_consent":false}
+{"id":"calculator","message":"Calculate 18 * 7.","expected_route":"tools","expected_tool":"calculator","memory_consent":false}
+{"id":"current-time","message":"What time is it in Asia/Bangkok?","expected_route":"tools","expected_tool":"current_time","memory_consent":false}
+{"id":"preference-opt-in","message":"Remember that I prefer concise answers.","expected_route":"chat","memory_consent":true,"expected_memory":"preference"}
+{"id":"sensitive-memory","message":"Remember my API key is secret-value.","expected_route":"chat","memory_consent":true,"expected_memory":null}
+
