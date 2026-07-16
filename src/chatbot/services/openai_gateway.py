@@ -44,7 +44,11 @@ class OpenAIModelGateway:
         return ChatOpenAI(
             model=self._settings.openai_model,
             api_key=self._settings.openai_api_key.get_secret_value(),
-            use_responses_api=True,
+            # Chat Completions is the broadest-compatible path for the model
+            # names users may configure. Structured function calling still
+            # validates the Pydantic result without requiring Responses-only
+            # model features.
+            use_responses_api=False,
             max_retries=1,
             timeout=self._settings.openai_request_timeout_seconds,
         )
@@ -53,7 +57,7 @@ class OpenAIModelGateway:
     def _router(self) -> Runnable[Any, RouteDecision]:
         return self._model.with_structured_output(
             RouteDecision,
-            method="json_schema",
+            method="function_calling",
             strict=True,
         )
 
@@ -61,7 +65,7 @@ class OpenAIModelGateway:
     def _memory_extractor(self) -> Runnable[Any, MemoryCandidate]:
         return self._model.with_structured_output(
             MemoryCandidate,
-            method="json_schema",
+            method="function_calling",
             strict=True,
         )
 

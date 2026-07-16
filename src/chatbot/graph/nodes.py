@@ -196,7 +196,19 @@ def _response_update(state: ChatState, answer: str) -> dict[str, object]:
 
 
 def _log_node_failure(node: str, error: Exception) -> None:
+    # Provider exceptions can contain request details, so log only bounded,
+    # structured metadata that is useful for diagnosis and safe for JSON logs.
+    details = {
+        name: getattr(error, name, None)
+        for name in ("status_code", "code", "param", "type")
+        if getattr(error, name, None) is not None
+    }
     logger.warning(
         "graph_node_failed",
-        extra={"event": "graph_node_failed", "node": node, "error_type": type(error).__name__},
+        extra={
+            "event": "graph_node_failed",
+            "node": node,
+            "error_type": type(error).__name__,
+            "provider_error": details or None,
+        },
     )
