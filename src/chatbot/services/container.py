@@ -12,6 +12,7 @@ from chatbot.config import Settings
 from chatbot.graph.builder import GraphDependencies, build_graph
 from chatbot.graph.service import ChatbotService
 from chatbot.memory.repository import MemoryRepository
+from chatbot.processes.registry import build_process_registry
 from chatbot.retrieval.chroma import ChromaKnowledgeBase
 from chatbot.retrieval.models import KnowledgeBase
 from chatbot.services.checkpoints import CheckpointerResource
@@ -58,12 +59,14 @@ def build_container(settings: Settings) -> AppContainer:
         )
         model = OpenAIModelGateway(settings)
         tools = ToolRegistry(knowledge_base=knowledge_base)
+        processes = build_process_registry(knowledge_base)
         graph = build_graph(
             GraphDependencies(
                 model=model,
                 knowledge_base=knowledge_base,
                 tools=tools,
                 memories=memories,
+                processes=processes,
             ),
             checkpointer=checkpointer,
         )
@@ -76,7 +79,7 @@ def build_container(settings: Settings) -> AppContainer:
         return AppContainer(
             settings=settings,
             auth=auth,
-            chatbot=ChatbotService(graph),
+            chatbot=ChatbotService(graph, processes),
             memories=memories,
             knowledge_base=knowledge_base,
             _closer=stack.close,

@@ -14,14 +14,22 @@ flowchart LR
   D -->|"chat"| E["chat"]
   D -->|"retrieve"| F["retrieve"]
   D -->|"tools"| G["tools"]
+  D -->|"process"| K["process control"]
+  K -->|"continue"| L["registered process subgraph"]
   E --> H["memory"]
   F --> H
   G --> H
+  L --> H
+  K -->|"control response"| I
   H --> I["respond"]
   I --> J["Checkpoint + JSON log"]
 ```
 
-The normal path uses one structured router call and one response call. The memory node makes a third call only with explicit consent. Invalid routes and repeated provider/tool failures go directly to a fixed safe response.
+The normal chat/retrieval/tool path uses one structured router call and one response call. Explicit
+process controls bypass model routing, while natural-language process selection uses the same
+structured router. Process prompts and results return directly without a second general response
+call. The memory node makes another call only with explicit consent. Invalid routes and repeated
+provider, tool, or process failures go directly to a fixed safe response.
 
 ## Component contracts
 
@@ -34,6 +42,8 @@ The normal path uses one structured router call and one response call. The memor
 | Memory control | Authenticated callers can list/delete only records matched by their owner key. |
 | Retrieval | Index application-owned Markdown via an explicit CLI command. Treat all returned text as untrusted reference data. |
 | Tools | Register calculator, current-time, and knowledge-search explicitly; validate Pydantic arguments and bound results. |
+| Processes | Register reviewed code plug-ins at startup. Persist one bounded, validated record per plug-in in the parent subject/session checkpoint. Only one process may be active at a time. |
+| Process routing | Explicit API actions override AI routing. Pass only trusted plug-in descriptions and status/step metadata to the router, never collected process payloads. |
 | Observability | Emit JSON logs with validated request IDs; never serialize bodies, secrets, retrieved text, or memory values. |
 
 ## Performance boundaries
@@ -55,6 +65,7 @@ The normal path uses one structured router call and one response call. The memor
 | API/auth | Test login success/failure, invalid/expired token rejection, validation, and ownership. |
 | Retrieval | Test Markdown-only loading, persistent indexing, bounded search, and injection isolation. |
 | Persistence | Test subject/session isolation and reopening the local SQLite checkpointer. |
+| Process | Test start/continue/switch/cancel/status, exact-step resumption, lifecycle limits, invalid plug-in output, and safe failures. |
 | Logging | Assert sentinel credentials/tokens are absent from JSON output. |
 
 CI must use fakes for model and embedding boundaries and must not require OpenAI secrets or network calls.
@@ -65,5 +76,5 @@ CI must use fakes for model and embedding boundaries and must not require OpenAI
 - Registration, refresh tokens, roles, OAuth, or external identity providers
 - User-uploaded documents or tenant knowledge bases
 - Arbitrary tools, browser access, or model-selected code execution
-- Deep Agents, subagent orchestration, or human approval interrupts
+- Deep Agents, open-ended subagent orchestration, runtime workflow uploads, or human approval interrupts
 - Real OpenAI calls in CI

@@ -14,6 +14,7 @@ from chatbot.graph.schemas import RouteDecision
 from chatbot.graph.service import ChatbotService
 from chatbot.memory.repository import MemoryRepository
 from chatbot.memory.schemas import MemoryCandidate
+from chatbot.processes.registry import build_process_registry
 from chatbot.retrieval.models import KnowledgeSnippet
 from chatbot.services.container import AppContainer
 from chatbot.tools.registry import ToolRegistry
@@ -25,8 +26,14 @@ class FakeKnowledgeBase:
 
 
 class FakeGateway:
-    def decide_route(self, message: str) -> RouteDecision:
-        return RouteDecision(route="chat", tool_name=None, tool_input=None)
+    def decide_route(self, message: str, process_context: str) -> RouteDecision:
+        return RouteDecision(
+            route="chat",
+            tool_name=None,
+            tool_input=None,
+            process_action=None,
+            process_name=None,
+        )
 
     def generate(self, messages: list[BaseMessage]) -> str:
         return "Hello from the graph"
@@ -56,12 +63,14 @@ def make_container(tmp_path: Path) -> AppContainer:
     )
     memories = MemoryRepository(settings.database_url)
     knowledge = FakeKnowledgeBase()
+    processes = build_process_registry(knowledge)
     graph = build_graph(
         GraphDependencies(
             model=FakeGateway(),
             knowledge_base=knowledge,
             tools=ToolRegistry(knowledge_base=knowledge),
             memories=memories,
+            processes=processes,
         ),
         checkpointer=InMemorySaver(),
     )
@@ -72,7 +81,7 @@ def make_container(tmp_path: Path) -> AppContainer:
             password_hash=settings.auth_password_hash.get_secret_value(),
             jwt_secret=settings.jwt_secret.get_secret_value(),
         ),
-        chatbot=ChatbotService(graph),
+        chatbot=ChatbotService(graph, processes),
         memories=memories,
         knowledge_base=knowledge,
     )
@@ -148,4 +157,167 @@ def test_correlation_id_is_validated_before_logging_or_echoing(tmp_path: Path) -
 
         assert invalid.headers["X-Request-ID"] != "bad\r\nvalue"
         assert valid.headers["X-Request-ID"] == "request-123"
+    container.close()
+
+
+def test_chat_can_start_project_brief_process(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "process-session",
+                "message": "Start a project brief",
+                "process_action": "start",
+                "process_name": "project_brief",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "What goal should this project accomplish?"
+        assert response.json()["processes"] == [
+            {
+                "name": "project_brief",
+                "status": "waiting",
+                "step": "goal",
+                "active": True,
+            }
+        ]
+    container.close()
+
+
+def test_processes_can_switch_and_resume_their_saved_step(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+        session = "switch-session"
+
+        client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start a brief",
+                "process_action": "start",
+                "process_name": "project_brief",
+            },
+        )
+        audience = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Launch a secure chatbot",
+                "process_action": "continue",
+                "process_name": "project_brief",
+            },
+        )
+        assert audience.json()["response"] == "Who is the intended audience for this project?"
+
+        troubleshooting = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start troubleshooting",
+                "process_action": "start",
+                "process_name": "troubleshoot",
+            },
+        )
+        assert troubleshooting.status_code == 200
+        assert troubleshooting.json()["response"] == "What problem are you experiencing?"
+        assert troubleshooting.json()["processes"] == [
+            {
+                "name": "project_brief",
+                "status": "suspended",
+                "step": "audience",
+                "active": False,
+            },
+            {
+                "name": "troubleshoot",
+                "status": "waiting",
+                "step": "problem",
+                "active": True,
+            },
+        ]
+
+        resumed = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Resume the brief",
+                "process_action": "switch",
+                "process_name": "project_brief",
+            },
+        )
+        assert resumed.json()["response"] == "Who is the intended audience for this project?"
+
+        constraints = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Python developers",
+                "process_action": "continue",
+                "process_name": "project_brief",
+            },
+        )
+        assert constraints.json()["response"].startswith("What constraints")
+        brief_view = next(
+            item for item in constraints.json()["processes"] if item["name"] == "project_brief"
+        )
+        assert brief_view == {
+            "name": "project_brief",
+            "status": "waiting",
+            "step": "constraints",
+            "active": True,
+        }
+    container.close()
+
+
+def test_explicit_process_controls_validate_names(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        missing = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "validation",
+                "message": "start",
+                "process_action": "start",
+            },
+        )
+        unknown = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "validation",
+                "message": "start",
+                "process_action": "start",
+                "process_name": "not_registered",
+            },
+        )
+        ambiguous = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "validation",
+                "message": "start",
+                "process_name": "project_brief",
+            },
+        )
+
+        assert missing.status_code == 422
+        assert unknown.status_code == 422
+        assert ambiguous.status_code == 422
     container.close()

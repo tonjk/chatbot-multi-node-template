@@ -21,7 +21,7 @@ from chatbot.api.schemas import (
 )
 from chatbot.auth.service import InvalidTokenError
 from chatbot.config import Settings
-from chatbot.graph.service import SAFE_FAILURE_MESSAGE
+from chatbot.graph.service import SAFE_FAILURE_MESSAGE, InvalidProcessRequest
 from chatbot.services.container import AppContainer, build_container
 from chatbot.services.logging import (
     configure_logging,
@@ -120,7 +120,11 @@ def create_app(
                 message=payload.message,
                 memory_consent=payload.memory_consent,
                 correlation_id=get_correlation_id(),
+                process_action=payload.process_action,
+                process_name=payload.process_name,
             )
+        except InvalidProcessRequest as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
         except Exception as error:
             logger.warning(
                 "chat_failed",
@@ -132,6 +136,7 @@ def create_app(
             response=result.response,
             route=result.route,
             correlation_id=get_correlation_id(),
+            processes=[item.model_dump() for item in result.processes],
         )
 
     @application.get("/memories", response_model=list[MemoryResponse])

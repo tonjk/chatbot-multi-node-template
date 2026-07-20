@@ -6,6 +6,7 @@ from typing import Any
 from langgraph.graph import MessagesState
 
 from chatbot.graph.schemas import RouteName
+from chatbot.processes.schemas import ProcessAction, ProcessControlAction
 
 
 class ChatState(MessagesState, total=False):
@@ -16,6 +17,12 @@ class ChatState(MessagesState, total=False):
     tool_result: str
     response: str
     error_code: str | None
+    processes: dict[str, dict[str, Any]]
+    active_process: str | None
+    process_action: ProcessControlAction | None
+    process_name: str | None
+    process_message: str
+    process_should_dispatch: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,3 +33,5 @@ class GraphContext:
     session_id: str
     memory_consent: bool
     correlation_id: str
+    process_action: ProcessAction
+    process_name: str | None

@@ -7,8 +7,9 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chatbot.memory.schemas import MemoryCandidate
+from chatbot.processes.schemas import ProcessControlAction, ProcessView
 
-RouteName = Literal["chat", "retrieve", "tools"]
+RouteName = Literal["chat", "retrieve", "tools", "process"]
 ToolName = Literal["calculator", "current_time", "knowledge_search"]
 
 
@@ -20,6 +21,11 @@ class RouteDecision(BaseModel):
     route: RouteName
     tool_name: ToolName | None
     tool_input: str | None = Field(max_length=500)
+    process_action: ProcessControlAction | None
+    process_name: str | None = Field(
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]{0,63}$",
+    )
 
     @model_validator(mode="after")
     def validate_tool_fields(self) -> "RouteDecision":
@@ -30,6 +36,13 @@ class RouteDecision(BaseModel):
                 raise ValueError("This tool route requires tool input")
         elif self.tool_name is not None or self.tool_input is not None:
             raise ValueError("Only tool routes may include tool fields")
+        if self.route == "process":
+            if self.process_action is None:
+                raise ValueError("Process routes require a process action")
+            if self.process_action != "status" and self.process_name is None:
+                raise ValueError("This process action requires a process name")
+        elif self.process_action is not None or self.process_name is not None:
+            raise ValueError("Only process routes may include process fields")
         return self
 
     def as_tool_arguments(self) -> dict[str, str]:
@@ -45,7 +58,11 @@ class RouteDecision(BaseModel):
 class ModelGateway(Protocol):
     """Boundary around all provider calls so tests never need a real model."""
 
-    def decide_route(self, message: str) -> RouteDecision | dict[str, Any]: ...
+    def decide_route(
+        self,
+        message: str,
+        process_context: str,
+    ) -> RouteDecision | dict[str, Any]: ...
 
     def generate(self, messages: list[BaseMessage]) -> str: ...
 
@@ -56,3 +73,4 @@ class ModelGateway(Protocol):
 class ChatResult:
     response: str
     route: RouteName
+    processes: tuple[ProcessView, ...]

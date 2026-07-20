@@ -1,4 +1,4 @@
-"""Focused node implementations for the six-node chatbot graph."""
+"""Focused node implementations for the chatbot graph."""
 
 import logging
 from typing import TYPE_CHECKING, Literal, cast
@@ -9,10 +9,12 @@ from langgraph.runtime import Runtime
 from chatbot.graph.schemas import RouteDecision, RouteName
 from chatbot.graph.state import ChatState, GraphContext
 from chatbot.memory.schemas import MemoryCandidate
+from chatbot.processes.schemas import ProcessControlAction, ProcessRecord
 from chatbot.tools.registry import ToolValidationError
 
 if TYPE_CHECKING:
     from chatbot.graph.builder import GraphDependencies
+    from chatbot.processes.registry import ProcessRegistry
 
 SAFE_FAILURE_MESSAGE = "I couldn't complete that request safely. Please try again."
 _MAX_HISTORY_MESSAGES = 20
@@ -26,7 +28,11 @@ class ChatNodes:
     def __init__(self, dependencies: "GraphDependencies") -> None:
         self._dependencies = dependencies
 
-    def router(self, state: ChatState) -> dict[str, object]:
+    def router(
+        self,
+        state: ChatState,
+        runtime: Runtime[GraphContext],
+    ) -> dict[str, object]:
         """Choose one registered capability using validated structured output."""
 
         updates: dict[str, object] = {
@@ -36,9 +42,28 @@ class ChatNodes:
             "tool_result": "",
             "response": "",
             "error_code": None,
+            "process_action": None,
+            "process_name": None,
+            "process_message": "",
+            "process_should_dispatch": False,
         }
         try:
-            raw_decision = self._dependencies.model.decide_route(_latest_user_text(state))
+            if runtime.context.process_action == "auto":
+                raw_decision = self._dependencies.model.decide_route(
+                    _latest_user_text(state),
+                    _routing_context(state, self._dependencies.processes),
+                )
+            else:
+                raw_decision = RouteDecision(
+                    route="process",
+                    tool_name=None,
+                    tool_input=None,
+                    process_action=cast(
+                        ProcessControlAction,
+                        runtime.context.process_action,
+                    ),
+                    process_name=runtime.context.process_name,
+                )
             decision = RouteDecision.model_validate(raw_decision)
         except Exception as error:
             _log_node_failure("router", error)
@@ -49,8 +74,18 @@ class ChatNodes:
                 "route": decision.route,
                 "tool_name": decision.tool_name,
                 "tool_arguments": decision.as_tool_arguments(),
+                "process_action": decision.process_action,
+                "process_name": decision.process_name,
             }
         )
+        if decision.route != "process":
+            try:
+                processes, active_process = _suspend_active_process(state)
+            except Exception as error:
+                _log_node_failure("router", error)
+                updates.update({"route": "chat", "error_code": "process_state_failed"})
+                return updates
+            updates.update({"processes": processes, "active_process": active_process})
         return updates
 
     def chat(self, state: ChatState) -> dict[str, object]:
@@ -87,6 +122,129 @@ class ChatNodes:
             return {"error_code": "tool_failed"}
         return {"tool_result": result.content}
 
+    def process_control(self, state: ChatState) -> dict[str, object]:
+        """Apply deterministic process lifecycle actions before dispatch."""
+
+        action = state.get("process_action")
+        name = state.get("process_name")
+        try:
+            records = _process_records(state)
+        except Exception as error:
+            _log_node_failure("process_control", error)
+            return {"error_code": "process_state_failed"}
+
+        if action == "status":
+            selected = records.get(name) if name else None
+            if name and selected is None:
+                return {"process_message": f"{name} has not been started."}
+            return {"process_message": _process_status_message(records, name)}
+
+        if not action or not name:
+            return {"process_message": "Please choose a registered process and action."}
+        plugin = self._dependencies.processes.get(name)
+        if plugin is None:
+            return {
+                "process_message": _unknown_process_message(
+                    name,
+                    self._dependencies.processes.names,
+                )
+            }
+
+        if action == "start":
+            existing = records.get(name)
+            if existing and existing.status in {"waiting", "suspended"}:
+                return {
+                    "process_message": (
+                        f"{name} is already unfinished at step '{existing.step}'. "
+                        "Continue or switch to it instead of starting over."
+                    )
+                }
+            records = _suspend_records(records, state.get("active_process"), except_name=name)
+            record = plugin.start()
+            records[name] = record
+            return {
+                "processes": _dump_records(records),
+                "active_process": name,
+                "process_message": record.prompt,
+            }
+
+        existing = records.get(name)
+        if existing is None:
+            return {"process_message": f"{name} has not been started."}
+
+        if action == "switch":
+            if existing.status not in {"waiting", "suspended"}:
+                return {
+                    "process_message": (
+                        f"{name} cannot be resumed because it is {existing.status}."
+                    )
+                }
+            records = _suspend_records(records, state.get("active_process"), except_name=name)
+            existing = existing.model_copy(update={"status": "waiting"})
+            records[name] = existing
+            return {
+                "processes": _dump_records(records),
+                "active_process": name,
+                "process_message": existing.prompt,
+            }
+
+        if action == "continue":
+            if existing.status not in {"waiting", "suspended"}:
+                return {
+                    "process_message": (f"{name} cannot continue because it is {existing.status}.")
+                }
+            records = _suspend_records(records, state.get("active_process"), except_name=name)
+            records[name] = existing.model_copy(update={"status": "waiting"})
+            return {
+                "processes": _dump_records(records),
+                "active_process": name,
+                "process_should_dispatch": True,
+            }
+
+        if action == "cancel":
+            if existing.status in {"completed", "cancelled", "failed"}:
+                return {"process_message": f"{name} is already {existing.status}."}
+            records[name] = existing.model_copy(
+                update={"status": "cancelled", "prompt": "", "result": ""}
+            )
+            return {
+                "processes": _dump_records(records),
+                "active_process": (
+                    None if state.get("active_process") == name else state.get("active_process")
+                ),
+                "process_message": f"Cancelled {name}.",
+            }
+
+        return {"process_message": "Unsupported process action."}
+
+    def process_dispatch(self, state: ChatState) -> dict[str, object]:
+        """Advance exactly one validated process from its checkpointed record."""
+
+        name = state.get("process_name")
+        plugin = self._dependencies.processes.get(name or "")
+        try:
+            records = _process_records(state)
+            if plugin is None or name is None or name not in records:
+                raise ValueError("Process dispatch target is not registered")
+            record = plugin.advance(records[name], _latest_user_text(state))
+        except Exception as error:
+            _log_node_failure("process_dispatch", error)
+            return {"error_code": "process_failed"}
+        records[name] = record
+        is_active = record.status in {"waiting", "suspended"}
+        if record.status == "completed":
+            message = record.result or f"Completed {name}."
+        elif record.status == "failed":
+            message = SAFE_FAILURE_MESSAGE
+        else:
+            message = record.prompt
+        return {
+            "processes": _dump_records(records),
+            "active_process": name if is_active else None,
+            "process_message": message,
+            "process_should_dispatch": False,
+        }
+
     def memory(
         self,
         state: ChatState,
@@ -119,6 +277,9 @@ class ChatNodes:
 
         if state.get("error_code"):
             return _response_update(state, SAFE_FAILURE_MESSAGE)
+        if state.get("route") == "process":
+            answer = state.get("process_message", "").strip() or SAFE_FAILURE_MESSAGE
+            return _response_update(state, answer[:_MAX_RESPONSE_CHARS])
         try:
             memories = self._dependencies.memories.list_for_subject(
                 runtime.context.subject, limit=10
@@ -139,13 +300,19 @@ class ChatNodes:
 
 def route_after_router(
     state: ChatState,
-) -> Literal["chat", "retrieve", "tools", "respond"]:
+) -> Literal["chat", "retrieve", "tools", "process", "respond"]:
     if state.get("error_code"):
         return "respond"
     route = state.get("route")
-    if route in {"chat", "retrieve", "tools"}:
+    if route in {"chat", "retrieve", "tools", "process"}:
         return cast(RouteName, route)
     return "respond"
+
+
+def route_after_process_control(state: ChatState) -> Literal["dispatch", "respond"]:
+    if state.get("error_code") or not state.get("process_should_dispatch"):
+        return "respond"
+    return "dispatch"
 
 
 def _latest_user_text(state: ChatState) -> str:
@@ -192,7 +359,90 @@ def _response_update(state: ChatState, answer: str) -> dict[str, object]:
         "tool_result": "",
         "tool_arguments": {},
         "tool_name": None,
+        "process_action": None,
+        "process_name": None,
+        "process_message": "",
+        "process_should_dispatch": False,
     }
+
+
+def _routing_context(state: ChatState, registry: "ProcessRegistry") -> str:
+    lines = ["REGISTERED PROCESSES (trusted application metadata):"]
+    for name, description in registry.descriptions():
+        lines.append(f"- {name}: {description}")
+    lines.append("PROCESS STATUS (metadata only):")
+    try:
+        records = _process_records(state)
+    except Exception:
+        records = {}
+    if not records:
+        lines.append("- none started")
+    else:
+        active = state.get("active_process")
+        for name, record in records.items():
+            marker = "active" if name == active else "inactive"
+            lines.append(f"- {name}: {record.status}, step={record.step}, {marker}")
+    return "\n".join(lines)[:4_000]
+
+
+def _process_records(state: ChatState) -> dict[str, ProcessRecord]:
+    raw_records = state.get("processes", {})
+    if not isinstance(raw_records, dict) or len(raw_records) > 20:
+        raise ValueError("Invalid process record collection")
+    records: dict[str, ProcessRecord] = {}
+    for name, raw_record in raw_records.items():
+        record = ProcessRecord.model_validate(raw_record)
+        if record.name != name:
+            raise ValueError("Process record key does not match its name")
+        records[name] = record
+    return records
+
+
+def _dump_records(records: dict[str, ProcessRecord]) -> dict[str, dict[str, object]]:
+    return {name: record.model_dump(mode="json") for name, record in records.items()}
+
+
+def _suspend_records(
+    records: dict[str, ProcessRecord],
+    active_name: str | None,
+    *,
+    except_name: str | None = None,
+) -> dict[str, ProcessRecord]:
+    updated = dict(records)
+    if active_name and active_name != except_name:
+        active = updated.get(active_name)
+        if active is None:
+            raise ValueError("Active process record is missing")
+        if active.status == "waiting":
+            updated[active_name] = active.model_copy(update={"status": "suspended"})
+    return updated
+
+
+def _suspend_active_process(
+    state: ChatState,
+) -> tuple[dict[str, dict[str, object]], None]:
+    records = _process_records(state)
+    records = _suspend_records(records, state.get("active_process"))
+    return _dump_records(records), None
+
+
+def _unknown_process_message(name: str, available: frozenset[str]) -> str:
+    choices = ", ".join(sorted(available))
+    return f"Unknown process '{name}'. Available processes: {choices}."
+
+
+def _process_status_message(
+    records: dict[str, ProcessRecord],
+    name: str | None,
+) -> str:
+    if name:
+        record = records[name]
+        return f"{name} is {record.status} at step '{record.step}'."
+    if not records:
+        return "No processes have been started."
+    return "Process status: " + "; ".join(
+        f"{record.name} is {record.status} at {record.step}" for record in records.values()
+    )
 
 
 def _log_node_failure(node: str, error: Exception) -> None:

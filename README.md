@@ -8,10 +8,14 @@ flowchart LR
   B -->|"conversation"| C["chat"]
   B -->|"shared knowledge"| D["retrieve"]
   B -->|"safe operation"| E["tools"]
+  B -->|"registered process"| P["process control"]
+  P --> Q["selected process subgraph"]
   C --> F["memory"]
   D --> F
   E --> F
+  Q --> F
   F --> G["respond"]
+  P --> G
   G --> H["checkpoint + JSON log"]
 ```
 
@@ -19,7 +23,10 @@ The normal path makes two model calls: structured routing and final response. Me
 
 ## Included components
 
-- Six-node LangGraph workflow: `router`, `chat`, `retrieve`, `tools`, `memory`, `respond`
+- Focused LangGraph nodes for routing, chat, retrieval, tools, process control, memory, and response
+- Code-registered sequential process plug-ins with deterministic start, continue, switch,
+  cancel, and status controls
+- Checkpointed process suspension and explicit resumption within each authenticated session
 - OpenAI through `langchain-openai`, with the model selected only by `OPENAI_MODEL`
 - SQLite checkpoints and durable memory locally; PostgreSQL support for production state
 - Persistent local Chroma index built from application-owned Markdown
@@ -94,6 +101,47 @@ Chat request:
 }
 ```
 
+Existing requests remain valid. To control a process explicitly, add `process_action` and,
+when required, `process_name`:
+
+```json
+{
+  "session_id": "demo-session",
+  "message": "Start a project brief",
+  "process_action": "start",
+  "process_name": "project_brief"
+}
+```
+
+`process_action` defaults to `auto`, which lets the structured AI router choose the capability.
+Explicit actions bypass AI routing. The supported actions are:
+
+| Action | Behavior |
+| --- | --- |
+| `start` | Start a new process or restart a completed, cancelled, or failed process. |
+| `continue` | Consume `message` as the next input for an unfinished process. |
+| `switch` | Activate an unfinished process and repeat its saved prompt without consuming `message`. |
+| `cancel` | Cancel an unfinished process. |
+| `status` | Report one named process or all processes started in the session. |
+| `auto` | Let the validated model router select chat, retrieval, a tool, or process control. |
+
+Chat responses include a bounded `processes` list containing only each process name, status,
+public step, and active flag. Internal process payloads are checkpointed but never returned or
+included in router context.
+
+## Process plug-ins
+
+The built-in `project_brief` process collects a goal, audience, and constraints, supports up to
+three review revisions, and completes on approval. The built-in `troubleshoot` process uses the
+shared knowledge interface as untrusted reference data and stops after two unsuccessful attempts.
+
+Each plug-in is reviewed Python code registered once during application startup. A plug-in owns a
+Pydantic payload model, an initial step and prompt, and a stateless compiled child graph. The parent
+graph stores the validated process record in its subject/session-scoped checkpoint, so one process
+can be suspended while another capability runs and later resume at the exact saved step. Runtime
+workflow uploads, parallel process execution, arbitrary tools, and `interrupt()` are intentionally
+not supported.
+
 `memory_consent` defaults to `false` on every request. A previously consented turn cannot make consent sticky because consent is supplied through non-persisted runtime context and checked again by the memory repository.
 
 ## Configuration
@@ -130,7 +178,10 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Tests cover JWT validation, checkpoint isolation, per-turn memory consent, memory ownership/deletion, router failure, retrieval injection boundaries, tool validation, SQLite checkpoint persistence, JSON-log safety, API contracts, and Chroma indexing. They do not require OpenAI credentials or network calls.
+Tests cover JWT validation, checkpoint isolation, per-turn memory consent, memory ownership/deletion,
+router failure, retrieval injection boundaries, tool validation, process switching and lifecycle
+limits, SQLite process resumption, JSON-log safety, API contracts, and Chroma indexing. They do not
+require OpenAI credentials or network calls.
 
 ## Docker Compose
 

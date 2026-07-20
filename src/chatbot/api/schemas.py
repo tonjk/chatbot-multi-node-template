@@ -3,7 +3,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+
+from chatbot.processes.schemas import ProcessAction, ProcessStatus
 
 
 class ApiModel(BaseModel):
@@ -29,6 +31,12 @@ class ChatRequest(ApiModel):
     )
     message: str = Field(min_length=1, max_length=4_000)
     memory_consent: bool = False
+    process_action: ProcessAction = "auto"
+    process_name: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]{0,63}$",
+    )
 
     @field_validator("message")
     @classmethod
@@ -37,12 +45,29 @@ class ChatRequest(ApiModel):
             raise ValueError("Message cannot be blank")
         return value
 
+    @model_validator(mode="after")
+    def validate_process_control(self) -> "ChatRequest":
+        if self.process_action in {"start", "continue", "switch", "cancel"}:
+            if self.process_name is None:
+                raise ValueError("This process action requires process_name")
+        elif self.process_action == "auto" and self.process_name is not None:
+            raise ValueError("process_name requires an explicit process action")
+        return self
+
+
+class ProcessResponse(ApiModel):
+    name: str
+    status: ProcessStatus
+    step: str
+    active: bool
+
 
 class ChatResponse(ApiModel):
     session_id: str
     response: str
-    route: Literal["chat", "retrieve", "tools"]
+    route: Literal["chat", "retrieve", "tools", "process"]
     correlation_id: str
+    processes: list[ProcessResponse]
 
 
 class MemoryResponse(ApiModel):
