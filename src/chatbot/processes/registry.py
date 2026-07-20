@@ -2,10 +2,10 @@
 
 from collections.abc import Iterable
 
-from chatbot.processes.project_brief import build_project_brief_plugin
-from chatbot.processes.schemas import ProcessPlugin
-from chatbot.processes.troubleshoot import build_troubleshoot_plugin
-from chatbot.retrieval.models import KnowledgeBase
+from chatbot.processes.color_note import build_color_note_plugin
+from chatbot.processes.general_ask import build_general_ask_plugin
+from chatbot.processes.number_counter import build_number_counter_plugin
+from chatbot.processes.schemas import ProcessModel, ProcessPlugin
 
 
 class ProcessRegistry:
@@ -37,12 +37,13 @@ class ProcessRegistry:
         return tuple((name, plugin.description) for name, plugin in self._plugins.items())
 
 
-def build_process_registry(knowledge_base: KnowledgeBase) -> ProcessRegistry:
+def build_process_registry(model: ProcessModel) -> ProcessRegistry:
     """Build the reviewed process allow-list once per application lifespan."""
 
     return ProcessRegistry(
         [
-            build_project_brief_plugin(),
-            build_troubleshoot_plugin(knowledge_base),
+            build_number_counter_plugin(model),
+            build_color_note_plugin(model),
+            build_general_ask_plugin(model),
         ]
     )

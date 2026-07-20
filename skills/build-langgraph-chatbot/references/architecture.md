@@ -27,9 +27,11 @@ flowchart LR
 
 The normal chat/retrieval/tool path uses one structured router call and one response call. Explicit
 process controls bypass model routing, while natural-language process selection uses the same
-structured router. Process prompts and results return directly without a second general response
-call. The memory node makes another call only with explicit consent. Invalid routes and repeated
-provider, tool, or process failures go directly to a fixed safe response.
+structured router. An AI-routed `start` or `continue` creates or reactivates the selected process
+and consumes that same message as process input. Explicit lifecycle actions retain their strict API
+semantics. Process prompts and results return directly without a second general response call. The
+memory node makes another call only with explicit consent. Invalid routes and repeated provider,
+tool, or process failures go directly to a fixed safe response.
 
 ## Component contracts
 
@@ -42,8 +44,10 @@ provider, tool, or process failures go directly to a fixed safe response.
 | Memory control | Authenticated callers can list/delete only records matched by their owner key. |
 | Retrieval | Index application-owned Markdown via an explicit CLI command. Treat all returned text as untrusted reference data. |
 | Tools | Register calculator, current-time, and knowledge-search explicitly; validate Pydantic arguments and bound results. |
-| Processes | Register reviewed code plug-ins at startup. Persist one bounded, validated record per plug-in in the parent subject/session checkpoint. Only one process may be active at a time. |
+| Processes | Register reviewed code plug-ins at startup. Persist one bounded, validated record per plug-in in the parent subject/session checkpoint. Only one process may be active at a time. A plug-in may declare that its active waiting state yields to suspended-process reminders. |
 | Process routing | Explicit API actions override AI routing. Pass only trusted plug-in descriptions and status/step metadata to the router, never collected process payloads. |
+| Suspended process reminder | When no blocking process is active, append a bounded reminder for suspended processes. GeneralAsk yields reminders after answering. A short `continue` switches to the sole suspended process without consuming the control reply; `cancel` cancels it. Never resume automatically. |
+| Built-in processes | `number_counter` uses bounded structured model extraction and sums five stored integers, `color_note` uses bounded structured model extraction and summarizes three unique colors, and `general_ask` returns short model-only answers without retrieval. Number and color inputs may accumulate across messages or arrive together in one message. |
 | Observability | Emit JSON logs with validated request IDs; never serialize bodies, secrets, retrieved text, or memory values. |
 
 ## Performance boundaries
@@ -65,7 +69,7 @@ provider, tool, or process failures go directly to a fixed safe response.
 | API/auth | Test login success/failure, invalid/expired token rejection, validation, and ownership. |
 | Retrieval | Test Markdown-only loading, persistent indexing, bounded search, and injection isolation. |
 | Persistence | Test subject/session isolation and reopening the local SQLite checkpointer. |
-| Process | Test start/continue/switch/cancel/status, exact-step resumption, lifecycle limits, invalid plug-in output, and safe failures. |
+| Process | Test start/continue/switch/cancel/status, exact-step resumption, number/color thresholds, the GeneralAsk no-retrieval boundary, invalid plug-in output, and safe failures. |
 | Logging | Assert sentinel credentials/tokens are absent from JSON output. |
 
 CI must use fakes for model and embedding boundaries and must not require OpenAI secrets or network calls.

@@ -3,8 +3,9 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 
+from langchain_core.messages import BaseMessage
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
@@ -15,6 +16,35 @@ ProcessStatus = Literal["waiting", "suspended", "completed", "cancelled", "faile
 
 _PROCESS_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _MAX_PAYLOAD_BYTES = 12_000
+_BoundedInteger = Annotated[int, Field(ge=-1_000_000_000, le=1_000_000_000)]
+
+
+class NumberExtraction(BaseModel):
+    """Bounded structured output for numbers mentioned in one user message."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    numbers: list[_BoundedInteger] = Field(max_length=20)
+
+
+class ColorExtraction(BaseModel):
+    """Bounded structured output for colors mentioned in one user message."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    colors: list[Annotated[str, Field(min_length=1, max_length=40)]] = Field(
+        max_length=20,
+    )
+
+
+class ProcessModel(Protocol):
+    """Minimal model boundary available to model-backed process steps."""
+
+    def generate(self, messages: list[BaseMessage]) -> str: ...
+
+    def extract_numbers(self, message: str) -> NumberExtraction | dict[str, Any]: ...
+
+    def extract_colors(self, message: str) -> ColorExtraction | dict[str, Any]: ...
 
 
 class ProcessRecord(BaseModel):
@@ -79,6 +109,7 @@ class ProcessPlugin:
     initial_step: str
     initial_prompt: str
     graph: CompiledStateGraph
+    yields_to_suspended_reminders: bool = False
 
     def start(self) -> ProcessRecord:
         payload = self.initial_state().model_dump(mode="json")

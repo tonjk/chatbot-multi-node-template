@@ -3,11 +3,10 @@
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chatbot.memory.schemas import MemoryCandidate
-from chatbot.processes.schemas import ProcessControlAction, ProcessView
+from chatbot.processes.schemas import ProcessControlAction, ProcessModel, ProcessView
 
 RouteName = Literal["chat", "retrieve", "tools", "process"]
 ToolName = Literal["calculator", "current_time", "knowledge_search"]
@@ -55,7 +54,7 @@ class RouteDecision(BaseModel):
         return {}
 
 
-class ModelGateway(Protocol):
+class ModelGateway(ProcessModel, Protocol):
     """Boundary around all provider calls so tests never need a real model."""
 
     def decide_route(
@@ -63,8 +62,6 @@ class ModelGateway(Protocol):
         message: str,
         process_context: str,
     ) -> RouteDecision | dict[str, Any]: ...
-
-    def generate(self, messages: list[BaseMessage]) -> str: ...
 
     def extract_memory(self, message: str) -> MemoryCandidate | dict[str, Any]: ...
 

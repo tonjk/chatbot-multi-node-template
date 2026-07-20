@@ -3,6 +3,7 @@
 from chatbot.processes.registry import ProcessRegistry, build_process_registry
 from chatbot.processes.schemas import (
     ProcessAction,
+    ProcessModel,
     ProcessPlugin,
     ProcessRecord,
     ProcessStatus,
@@ -11,6 +12,7 @@ from chatbot.processes.schemas import (
 
 __all__ = [
     "ProcessAction",
+    "ProcessModel",
     "ProcessPlugin",
     "ProcessRecord",
     "ProcessRegistry",

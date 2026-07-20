@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -62,6 +63,13 @@ class FakeGateway:
     def generate(self, messages: list[BaseMessage]) -> str:
         return "Generated"
 
+    def extract_numbers(self, message: str) -> dict[str, list[int]]:
+        numbers = re.findall(r"(?<![\w.])[+-]?\d+(?![\w.])", message)
+        return {"numbers": [int(value) for value in numbers]}
+
+    def extract_colors(self, message: str) -> dict[str, list[str]]:
+        return {"colors": []}
+
     def extract_memory(self, message: str) -> MemoryCandidate:
         return MemoryCandidate(
             should_store=False,
@@ -74,10 +82,11 @@ class FakeGateway:
 
 def build_process_service(checkpointer, memories: MemoryRepository) -> ChatbotService:
     knowledge = FakeKnowledgeBase()
-    processes = build_process_registry(knowledge)
+    model = FakeGateway()
+    processes = build_process_registry(model)
     graph = build_graph(
         GraphDependencies(
-            model=FakeGateway(),
+            model=model,
             knowledge_base=knowledge,
             tools=ToolRegistry(knowledge_base=knowledge),
             memories=memories,
@@ -99,14 +108,14 @@ def test_process_progress_survives_sqlite_checkpointer_reopen(tmp_path: Path) ->
             session_id="durable",
             message="start",
             process_action="start",
-            process_name="project_brief",
+            process_name="number_counter",
         )
         service.chat(
             subject="alice",
             session_id="durable",
-            message="Durable goal",
+            message="Remember 41",
             process_action="continue",
-            process_name="project_brief",
+            process_name="number_counter",
         )
     first_memories.close()
 
@@ -118,10 +127,10 @@ def test_process_progress_survives_sqlite_checkpointer_reopen(tmp_path: Path) ->
             session_id="durable",
             message="resume",
             process_action="switch",
-            process_name="project_brief",
+            process_name="number_counter",
         )
     reopened_memories.close()
 
-    assert resumed.response == "Who is the intended audience for this project?"
-    assert resumed.processes[0].step == "audience"
+    assert resumed.response == "Please input 4 more numbers."
+    assert resumed.processes[0].step == "collect_numbers"
     assert resumed.processes[0].active is True

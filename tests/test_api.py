@@ -21,12 +21,43 @@ from chatbot.tools.registry import ToolRegistry
 
 
 class FakeKnowledgeBase:
+    def __init__(self) -> None:
+        self.search_calls = 0
+
     def search(self, query: str, *, limit: int = 4) -> list[KnowledgeSnippet]:
+        self.search_calls += 1
         return [KnowledgeSnippet(content="Shared knowledge", source="knowledge/guide.md")][:limit]
 
 
 class FakeGateway:
+    def __init__(self) -> None:
+        self.number_extraction_messages: list[str] = []
+
     def decide_route(self, message: str, process_context: str) -> RouteDecision:
+        if message == "My first number is seven":
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="continue",
+                process_name="number_counter",
+            )
+        if message == "My favorite color is chartreuse":
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="start",
+                process_name="color_note",
+            )
+        if message == "What is Python?":
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="start",
+                process_name="general_ask",
+            )
         return RouteDecision(
             route="chat",
             tool_name=None,
@@ -37,6 +68,25 @@ class FakeGateway:
 
     def generate(self, messages: list[BaseMessage]) -> str:
         return "Hello from the graph"
+
+    def extract_numbers(self, message: str) -> dict[str, list[int]]:
+        self.number_extraction_messages.append(message)
+        values = {
+            "My first value is seven": [7],
+            "My first number is seven": [7],
+            "Count 10, -2, 7, 3, and 2": [10, -2, 7, 3, 2],
+            "Remember 8": [8],
+            "Remember 9": [9],
+        }
+        return {"numbers": values.get(message, [])}
+
+    def extract_colors(self, message: str) -> dict[str, list[str]]:
+        values = {
+            "BLUE, blue, grey, then red": ["blue", "blue", "gray", "red"],
+            "My first color is chartreuse": ["chartreuse"],
+            "My favorite color is chartreuse": ["chartreuse"],
+        }
+        return {"colors": values.get(message, [])}
 
     def extract_memory(self, message: str) -> MemoryCandidate:
         return MemoryCandidate(
@@ -63,10 +113,11 @@ def make_container(tmp_path: Path) -> AppContainer:
     )
     memories = MemoryRepository(settings.database_url)
     knowledge = FakeKnowledgeBase()
-    processes = build_process_registry(knowledge)
+    model = FakeGateway()
+    processes = build_process_registry(model)
     graph = build_graph(
         GraphDependencies(
-            model=FakeGateway(),
+            model=model,
             knowledge_base=knowledge,
             tools=ToolRegistry(knowledge_base=knowledge),
             memories=memories,
@@ -160,7 +211,7 @@ def test_correlation_id_is_validated_before_logging_or_echoing(tmp_path: Path) -
     container.close()
 
 
-def test_chat_can_start_project_brief_process(tmp_path: Path) -> None:
+def test_chat_can_start_number_counter_process(tmp_path: Path) -> None:
     container = make_container(tmp_path)
     app = create_app(container=container)
     with TestClient(app) as client:
@@ -171,23 +222,302 @@ def test_chat_can_start_project_brief_process(tmp_path: Path) -> None:
             headers=headers,
             json={
                 "session_id": "process-session",
-                "message": "Start a project brief",
+                "message": "Start counting numbers",
                 "process_action": "start",
-                "process_name": "project_brief",
+                "process_name": "number_counter",
             },
         )
 
         assert response.status_code == 200
         assert response.json()["route"] == "process"
-        assert response.json()["response"] == "What goal should this project accomplish?"
+        assert response.json()["response"] == "Please input 5 numbers."
         assert response.json()["processes"] == [
             {
-                "name": "project_brief",
+                "name": "number_counter",
                 "status": "waiting",
-                "step": "goal",
+                "step": "collect_numbers",
                 "active": True,
             }
         ]
+    container.close()
+
+
+def test_number_counter_completes_through_chat_api(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+        session = "number-counter-completion"
+        client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start counting",
+                "process_action": "start",
+                "process_name": "number_counter",
+            },
+        )
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Count 10, -2, 7, 3, and 2",
+                "process_action": "continue",
+                "process_name": "number_counter",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "Stored numbers: 10, -2, 7, 3, 2. Total: 20."
+        assert response.json()["processes"] == [
+            {
+                "name": "number_counter",
+                "status": "completed",
+                "step": "collect_numbers",
+                "active": False,
+            }
+        ]
+    container.close()
+
+
+def test_number_counter_uses_model_extraction_and_requests_remaining_values(
+    tmp_path: Path,
+) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+        session = "number-counter-model-extraction"
+        client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start counting",
+                "process_action": "start",
+                "process_name": "number_counter",
+            },
+        )
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "My first value is seven",
+                "process_action": "continue",
+                "process_name": "number_counter",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["response"] == "Please input 4 more numbers."
+    container.close()
+
+
+def test_auto_routed_first_number_starts_process_and_consumes_message(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "auto-start-number-counter",
+                "message": "My first number is seven",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "Please input 4 more numbers."
+        assert response.json()["processes"] == [
+            {
+                "name": "number_counter",
+                "status": "waiting",
+                "step": "collect_numbers",
+                "active": True,
+            }
+        ]
+    container.close()
+
+
+def test_color_note_completes_through_chat_api_with_unique_normalized_colors(
+    tmp_path: Path,
+) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+        session = "color-note-completion"
+        client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start color notes",
+                "process_action": "start",
+                "process_name": "color_note",
+            },
+        )
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "BLUE, blue, grey, then red",
+                "process_action": "continue",
+                "process_name": "color_note",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "Collected colors: blue, gray, red."
+        assert response.json()["processes"] == [
+            {
+                "name": "color_note",
+                "status": "completed",
+                "step": "collect_colors",
+                "active": False,
+            }
+        ]
+    container.close()
+
+
+def test_color_note_uses_model_extraction_without_a_fixed_color_list(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+        session = "color-note-model-extraction"
+        client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start color notes",
+                "process_action": "start",
+                "process_name": "color_note",
+            },
+        )
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "My first color is chartreuse",
+                "process_action": "continue",
+                "process_name": "color_note",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["response"] == "Please input 2 more colors."
+    container.close()
+
+
+def test_auto_routed_first_color_starts_process_and_consumes_message(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "auto-start-color-note",
+                "message": "My favorite color is chartreuse",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "Please input 2 more colors."
+        assert response.json()["processes"][0]["name"] == "color_note"
+        assert response.json()["processes"][0]["active"] is True
+    container.close()
+
+
+def test_general_ask_answers_through_chat_api_without_retrieval(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    knowledge = container.knowledge_base
+    assert isinstance(knowledge, FakeKnowledgeBase)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+        session = "general-ask-answer"
+        client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "Start general questions",
+                "process_action": "start",
+                "process_name": "general_ask",
+            },
+        )
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": session,
+                "message": "What is the capital of France?",
+                "process_action": "continue",
+                "process_name": "general_ask",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "Hello from the graph\n\nAsk another short question."
+        assert response.json()["processes"] == [
+            {
+                "name": "general_ask",
+                "status": "waiting",
+                "step": "answer_question",
+                "active": True,
+            }
+        ]
+        assert knowledge.search_calls == 0
+    container.close()
+
+
+def test_auto_routed_general_question_starts_process_and_answers_same_message(
+    tmp_path: Path,
+) -> None:
+    container = make_container(tmp_path)
+    knowledge = container.knowledge_base
+    assert isinstance(knowledge, FakeKnowledgeBase)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "auto-start-general-ask",
+                "message": "What is Python?",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["route"] == "process"
+        assert response.json()["response"] == "Hello from the graph\n\nAsk another short question."
+        assert response.json()["processes"][0]["name"] == "general_ask"
+        assert response.json()["processes"][0]["active"] is True
+        assert knowledge.search_calls == 0
     container.close()
 
 
@@ -203,46 +533,46 @@ def test_processes_can_switch_and_resume_their_saved_step(tmp_path: Path) -> Non
             headers=headers,
             json={
                 "session_id": session,
-                "message": "Start a brief",
+                "message": "Start counting",
                 "process_action": "start",
-                "process_name": "project_brief",
+                "process_name": "number_counter",
             },
         )
-        audience = client.post(
+        counting = client.post(
             "/chat",
             headers=headers,
             json={
                 "session_id": session,
-                "message": "Launch a secure chatbot",
+                "message": "Remember 8",
                 "process_action": "continue",
-                "process_name": "project_brief",
+                "process_name": "number_counter",
             },
         )
-        assert audience.json()["response"] == "Who is the intended audience for this project?"
+        assert counting.json()["response"] == "Please input 4 more numbers."
 
-        troubleshooting = client.post(
+        colors = client.post(
             "/chat",
             headers=headers,
             json={
                 "session_id": session,
-                "message": "Start troubleshooting",
+                "message": "Start color notes",
                 "process_action": "start",
-                "process_name": "troubleshoot",
+                "process_name": "color_note",
             },
         )
-        assert troubleshooting.status_code == 200
-        assert troubleshooting.json()["response"] == "What problem are you experiencing?"
-        assert troubleshooting.json()["processes"] == [
+        assert colors.status_code == 200
+        assert colors.json()["response"] == "Please input 3 colors."
+        assert colors.json()["processes"] == [
             {
-                "name": "project_brief",
+                "name": "number_counter",
                 "status": "suspended",
-                "step": "audience",
+                "step": "collect_numbers",
                 "active": False,
             },
             {
-                "name": "troubleshoot",
+                "name": "color_note",
                 "status": "waiting",
-                "step": "problem",
+                "step": "collect_colors",
                 "active": True,
             },
         ]
@@ -252,31 +582,31 @@ def test_processes_can_switch_and_resume_their_saved_step(tmp_path: Path) -> Non
             headers=headers,
             json={
                 "session_id": session,
-                "message": "Resume the brief",
+                "message": "Resume number counting",
                 "process_action": "switch",
-                "process_name": "project_brief",
+                "process_name": "number_counter",
             },
         )
-        assert resumed.json()["response"] == "Who is the intended audience for this project?"
+        assert resumed.json()["response"] == "Please input 4 more numbers."
 
-        constraints = client.post(
+        continued = client.post(
             "/chat",
             headers=headers,
             json={
                 "session_id": session,
-                "message": "Python developers",
+                "message": "Remember 9",
                 "process_action": "continue",
-                "process_name": "project_brief",
+                "process_name": "number_counter",
             },
         )
-        assert constraints.json()["response"].startswith("What constraints")
-        brief_view = next(
-            item for item in constraints.json()["processes"] if item["name"] == "project_brief"
+        assert continued.json()["response"] == "Please input 3 more numbers."
+        number_view = next(
+            item for item in continued.json()["processes"] if item["name"] == "number_counter"
         )
-        assert brief_view == {
-            "name": "project_brief",
+        assert number_view == {
+            "name": "number_counter",
             "status": "waiting",
-            "step": "constraints",
+            "step": "collect_numbers",
             "active": True,
         }
     container.close()
@@ -313,11 +643,34 @@ def test_explicit_process_controls_validate_names(tmp_path: Path) -> None:
             json={
                 "session_id": "validation",
                 "message": "start",
-                "process_name": "project_brief",
+                "process_name": "number_counter",
             },
         )
 
         assert missing.status_code == 422
         assert unknown.status_code == 422
         assert ambiguous.status_code == 422
+    container.close()
+
+
+def test_explicit_continue_still_requires_an_existing_process(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "strict-explicit-continue",
+                "message": "My first number is seven",
+                "process_action": "continue",
+                "process_name": "number_counter",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["response"] == "number_counter has not been started."
+        assert response.json()["processes"] == []
     container.close()

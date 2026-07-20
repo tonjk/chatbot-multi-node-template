@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +27,13 @@ class FakeKnowledgeBase:
         ][:limit]
 
 
-class FailingKnowledgeBase:
+class TrackingKnowledgeBase:
+    def __init__(self) -> None:
+        self.search_calls = 0
+
     def search(self, query: str, *, limit: int = 4) -> list[KnowledgeSnippet]:
-        raise RuntimeError("provider failed")
+        self.search_calls += 1
+        return [KnowledgeSnippet(content="Should not be used", source="knowledge/test.md")]
 
 
 class RecordingGateway:
@@ -37,6 +42,8 @@ class RecordingGateway:
         self.memory_calls = 0
         self.route_calls = 0
         self.route_contexts: list[str] = []
+        self.number_extraction_messages: list[str] = []
+        self.color_extraction_messages: list[str] = []
 
     def decide_route(
         self,
@@ -45,15 +52,31 @@ class RecordingGateway:
     ) -> RouteDecision | dict[str, Any]:
         self.route_calls += 1
         self.route_contexts.append(process_context)
+        if message == "continue" and "number_counter: suspended" in process_context:
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="switch",
+                process_name="number_counter",
+            )
+        if message == "cancel" and "number_counter: suspended" in process_context:
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="cancel",
+                process_name="number_counter",
+            )
         if "invalid route" in message:
             return {"route": "not-a-node"}
-        if "natural project brief" in message:
+        if "natural number counter" in message:
             return RouteDecision(
                 route="process",
                 tool_name=None,
                 tool_input=None,
                 process_action="start",
-                process_name="project_brief",
+                process_name="number_counter",
             )
         if "unknown process" in message:
             return RouteDecision(
@@ -91,6 +114,20 @@ class RecordingGateway:
         self.generated_messages.append(messages)
         return "Generated response"
 
+    def extract_numbers(self, message: str) -> dict[str, list[int]]:
+        self.number_extraction_messages.append(message)
+        numbers = re.findall(r"(?<![\w.])[+-]?\d+(?![\w.])", message)
+        return {"numbers": [int(value) for value in numbers]}
+
+    def extract_colors(self, message: str) -> dict[str, list[str]]:
+        self.color_extraction_messages.append(message)
+        names = re.findall(
+            r"\b(?:blue|red|green|gray|grey|chartreuse)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        return {"colors": ["gray" if value.casefold() == "grey" else value for value in names]}
+
     def extract_memory(self, message: str) -> MemoryCandidate:
         self.memory_calls += 1
         return MemoryCandidate(
@@ -102,6 +139,11 @@ class RecordingGateway:
         )
 
 
+class FailingGateway(RecordingGateway):
+    def generate(self, messages: list[BaseMessage]) -> str:
+        raise RuntimeError("provider failed")
+
+
 def make_service(
     tmp_path: Path,
     gateway: RecordingGateway,
@@ -110,7 +152,7 @@ def make_service(
     knowledge = knowledge or FakeKnowledgeBase()
     memories = MemoryRepository(f"sqlite:///{tmp_path / 'memory.db'}")
     tools = ToolRegistry(knowledge_base=knowledge)
-    processes = build_process_registry(knowledge)
+    processes = build_process_registry(gateway)
     graph = build_graph(
         GraphDependencies(
             model=gateway,
@@ -228,12 +270,12 @@ def test_natural_routing_starts_a_registered_process(tmp_path: Path) -> None:
     result = service.chat(
         subject="alice",
         session_id="natural",
-        message="natural project brief",
+        message="natural number counter",
     )
 
     assert result.route == "process"
-    assert result.response == "What goal should this project accomplish?"
-    assert result.processes[0].name == "project_brief"
+    assert result.response == "Please input 5 numbers."
+    assert result.processes[0].name == "number_counter"
     assert result.processes[0].active is True
     assert gateway.route_calls == 1
     memories.close()
@@ -248,7 +290,7 @@ def test_explicit_process_action_bypasses_ai_routing(tmp_path: Path) -> None:
         session_id="explicit",
         message="This text would otherwise be routed by the model",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
 
     assert result.route == "process"
@@ -264,7 +306,7 @@ def test_ordinary_chat_suspends_a_process_without_automatic_resume(tmp_path: Pat
         session_id="interrupt",
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
 
     result = service.chat(
@@ -274,30 +316,193 @@ def test_ordinary_chat_suspends_a_process_without_automatic_resume(tmp_path: Pat
     )
 
     assert result.route == "chat"
-    assert result.response == "Generated response"
+    assert result.response == (
+        "Generated response\n\n"
+        "You have a suspended 'number_counter' process. "
+        "Would you like to continue or cancel it?"
+    )
     assert result.processes[0].status == "suspended"
     assert result.processes[0].active is False
-    assert "project_brief: waiting, step=goal, active" in gateway.route_contexts[-1]
+    assert "number_counter: waiting, step=collect_numbers, active" in gateway.route_contexts[-1]
+    memories.close()
+
+
+def test_user_can_continue_the_suspended_process_after_the_reminder(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "continue-reminder"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Remember 8",
+        process_action="continue",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Tell me something unrelated",
+    )
+
+    resumed = service.chat(
+        subject="alice",
+        session_id=session,
+        message="continue",
+    )
+
+    assert resumed.route == "process"
+    assert resumed.response == "Please input 4 more numbers."
+    assert resumed.processes[0].status == "waiting"
+    assert resumed.processes[0].active is True
+    assert gateway.number_extraction_messages == ["Remember 8"]
+    memories.close()
+
+
+def test_user_can_cancel_the_suspended_process_after_the_reminder(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "cancel-reminder"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Tell me something unrelated",
+    )
+
+    cancelled = service.chat(
+        subject="alice",
+        session_id=session,
+        message="cancel",
+    )
+
+    assert cancelled.route == "process"
+    assert cancelled.response == "Cancelled number_counter."
+    assert cancelled.processes[0].status == "cancelled"
+    assert cancelled.processes[0].active is False
+    memories.close()
+
+
+def test_completing_active_process_prompts_for_suspended_process(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "completion-reminder"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Remember 8",
+        process_action="continue",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start colors",
+        process_action="start",
+        process_name="color_note",
+    )
+
+    completed = service.chat(
+        subject="alice",
+        session_id=session,
+        message="blue, red, and green",
+        process_action="continue",
+        process_name="color_note",
+    )
+
+    assert completed.response == (
+        "Collected colors: blue, red, green.\n\n"
+        "You have a suspended 'number_counter' process. "
+        "Would you like to continue or cancel it?"
+    )
+    assert completed.processes[0].status == "suspended"
+    assert completed.processes[1].status == "completed"
+    memories.close()
+
+
+def test_general_ask_answer_prompts_for_suspended_collection_process(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "general-ask-reminder"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Remember 8",
+        process_action="continue",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start general questions",
+        process_action="start",
+        process_name="general_ask",
+    )
+
+    answer = service.chat(
+        subject="alice",
+        session_id=session,
+        message="What is Python?",
+        process_action="continue",
+        process_name="general_ask",
+    )
+
+    assert answer.response == (
+        "Generated response\n\nAsk another short question.\n\n"
+        "You have a suspended 'number_counter' process. "
+        "Would you like to continue or cancel it?"
+    )
+    number_process = next(item for item in answer.processes if item.name == "number_counter")
+    general_process = next(item for item in answer.processes if item.name == "general_ask")
+    assert number_process.status == "suspended"
+    assert general_process.status == "waiting"
+    assert general_process.active is True
     memories.close()
 
 
 def test_router_context_excludes_collected_process_payloads(tmp_path: Path) -> None:
     gateway = RecordingGateway()
     service, memories = make_service(tmp_path, gateway)
-    sentinel = "PRIVATE-CHECKPOINTED-GOAL"
+    sentinel = "PRIVATE-CHECKPOINTED-NUMBER"
     service.chat(
         subject="alice",
         session_id="router-metadata",
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
     service.chat(
         subject="alice",
         session_id="router-metadata",
-        message=sentinel,
+        message=sentinel + " 42",
         process_action="continue",
-        process_name="project_brief",
+        process_name="number_counter",
     )
 
     service.chat(
@@ -307,7 +512,7 @@ def test_router_context_excludes_collected_process_payloads(tmp_path: Path) -> N
     )
 
     assert sentinel not in gateway.route_contexts[-1]
-    assert "project_brief: waiting, step=audience, active" in gateway.route_contexts[-1]
+    assert "number_counter: waiting, step=collect_numbers, active" in gateway.route_contexts[-1]
     memories.close()
 
 
@@ -319,7 +524,7 @@ def test_process_state_is_isolated_by_subject_and_session(tmp_path: Path) -> Non
         session_id="one",
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
 
     different_user = service.chat(
@@ -357,27 +562,136 @@ def test_unknown_model_selected_process_returns_clarification_without_state(tmp_
     memories.close()
 
 
-def test_project_brief_completes_and_can_be_restarted(tmp_path: Path) -> None:
+def test_number_counter_stores_five_values_and_reports_their_sum(tmp_path: Path) -> None:
     gateway = RecordingGateway()
     service, memories = make_service(tmp_path, gateway)
-    session = "brief-complete"
+    session = "number-counter"
     service.chat(
         subject="alice",
         session_id=session,
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
-    for answer in ("Ship the chatbot", "Developers", "Offline tests", "approve"):
-        result = service.chat(
-            subject="alice",
-            session_id=session,
-            message=answer,
-            process_action="continue",
-            process_name="project_brief",
-        )
+    no_number = service.chat(
+        subject="alice",
+        session_id=session,
+        message="there is no value here",
+        process_action="continue",
+        process_name="number_counter",
+    )
+    assert no_number.response == "Please input 5 numbers."
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="I found 10 and -2",
+        process_action="continue",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="then 7",
+        process_action="continue",
+        process_name="number_counter",
+    )
+    completed = service.chat(
+        subject="alice",
+        session_id=session,
+        message="also 3, 2, and 999",
+        process_action="continue",
+        process_name="number_counter",
+    )
 
-    assert result.response.startswith("Project brief\nGoal: Ship the chatbot")
+    assert completed.response == "Stored numbers: 10, -2, 7, 3, 2. Total: 20."
+    assert completed.processes[0].status == "completed"
+    assert completed.processes[0].active is False
+    memories.close()
+
+
+def test_color_note_collects_three_unique_colors_case_insensitively(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "color-note"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="color_note",
+    )
+    first = service.chat(
+        subject="alice",
+        session_id=session,
+        message="Blue and blue are the same color",
+        process_action="continue",
+        process_name="color_note",
+    )
+    assert first.response == "Please input 2 more colors."
+
+    completed = service.chat(
+        subject="alice",
+        session_id=session,
+        message="I also like RED and green",
+        process_action="continue",
+        process_name="color_note",
+    )
+
+    assert completed.response == "Collected colors: blue, red, green."
+    assert completed.processes[0].status == "completed"
+    assert completed.processes[0].active is False
+    memories.close()
+
+
+def test_general_ask_uses_only_the_model_and_returns_a_short_answer(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    knowledge = TrackingKnowledgeBase()
+    service, memories = make_service(tmp_path, gateway, knowledge)
+    service.chat(
+        subject="alice",
+        session_id="general-ask",
+        message="start",
+        process_action="start",
+        process_name="general_ask",
+    )
+
+    result = service.chat(
+        subject="alice",
+        session_id="general-ask",
+        message="Why is the sky blue?",
+        process_action="continue",
+        process_name="general_ask",
+    )
+
+    assert result.response == "Generated response\n\nAsk another short question."
+    assert result.processes[0].status == "waiting"
+    assert result.processes[0].active is True
+    assert knowledge.search_calls == 0
+    assert "at most two short sentences" in prompt_text(gateway.generated_messages[-1])
+    assert "UNTRUSTED KNOWLEDGE CONTEXT" not in prompt_text(gateway.generated_messages[-1])
+    memories.close()
+
+
+def test_completed_number_counter_can_be_restarted(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "counter-restart"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    result = service.chat(
+        subject="alice",
+        session_id=session,
+        message="1 2 3 4 5",
+        process_action="continue",
+        process_name="number_counter",
+    )
+
+    assert result.response == "Stored numbers: 1, 2, 3, 4, 5. Total: 15."
     assert result.processes[0].status == "completed"
     assert result.processes[0].active is False
 
@@ -386,10 +700,10 @@ def test_project_brief_completes_and_can_be_restarted(tmp_path: Path) -> None:
         session_id=session,
         message="start again",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
-    assert restarted.response == "What goal should this project accomplish?"
-    assert restarted.processes[0].step == "goal"
+    assert restarted.response == "Please input 5 numbers."
+    assert restarted.processes[0].step == "collect_numbers"
     assert restarted.processes[0].active is True
     memories.close()
 
@@ -402,7 +716,7 @@ def test_process_status_and_cancel_are_deterministic(tmp_path: Path) -> None:
         session_id="control",
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="color_note",
     )
 
     status = service.chat(
@@ -411,7 +725,7 @@ def test_process_status_and_cancel_are_deterministic(tmp_path: Path) -> None:
         message="status",
         process_action="status",
     )
-    assert status.response == "Process status: project_brief is waiting at goal"
+    assert status.response == "Process status: color_note is waiting at collect_colors"
     assert status.processes[0].active is True
 
     cancelled = service.chat(
@@ -419,126 +733,90 @@ def test_process_status_and_cancel_are_deterministic(tmp_path: Path) -> None:
         session_id="control",
         message="cancel",
         process_action="cancel",
-        process_name="project_brief",
+        process_name="color_note",
     )
-    assert cancelled.response == "Cancelled project_brief."
+    assert cancelled.response == "Cancelled color_note."
     assert cancelled.processes[0].status == "cancelled"
     assert cancelled.processes[0].active is False
     memories.close()
 
 
-def test_project_brief_limits_revisions_to_three(tmp_path: Path) -> None:
+def test_color_note_accepts_model_extracted_colors_and_normalizes_grey(tmp_path: Path) -> None:
     gateway = RecordingGateway()
     service, memories = make_service(tmp_path, gateway)
-    session = "brief-revisions"
+    session = "color-validation"
     service.chat(
         subject="alice",
         session_id=session,
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="color_note",
     )
-    for answer in ("Goal", "Audience", "Constraints"):
-        service.chat(
-            subject="alice",
-            session_id=session,
-            message=answer,
-            process_action="continue",
-            process_name="project_brief",
-        )
-    for revision in ("First change", "Second change", "Third change"):
-        service.chat(
-            subject="alice",
-            session_id=session,
-            message="revise",
-            process_action="continue",
-            process_name="project_brief",
-        )
-        service.chat(
-            subject="alice",
-            session_id=session,
-            message=revision,
-            process_action="continue",
-            process_name="project_brief",
-        )
-
-    limited = service.chat(
+    first = service.chat(
         subject="alice",
         session_id=session,
-        message="revise",
+        message="chartreuse",
         process_action="continue",
-        process_name="project_brief",
+        process_name="color_note",
+    )
+    normalized = service.chat(
+        subject="alice",
+        session_id=session,
+        message="Grey",
+        process_action="continue",
+        process_name="color_note",
     )
 
-    assert limited.response == (
-        "The three-revision limit has been reached. Reply 'approve' to finish."
-    )
-    assert limited.processes[0].step == "confirmation"
-    assert limited.processes[0].status == "waiting"
+    assert first.response == "Please input 2 more colors."
+    assert normalized.response == "Please input 1 more color."
+    assert normalized.processes[0].status == "waiting"
     memories.close()
 
 
-def test_troubleshooting_stops_after_two_attempts(tmp_path: Path) -> None:
+def test_general_ask_can_answer_multiple_questions(tmp_path: Path) -> None:
     gateway = RecordingGateway()
     service, memories = make_service(tmp_path, gateway)
-    session = "troubleshoot-limit"
+    session = "general-repeat"
     service.chat(
         subject="alice",
         session_id=session,
         message="start",
         process_action="start",
-        process_name="troubleshoot",
+        process_name="general_ask",
     )
-    first_attempt = service.chat(
+    first = service.chat(
         subject="alice",
         session_id=session,
-        message="The knowledge command fails",
+        message="What is Python?",
         process_action="continue",
-        process_name="troubleshoot",
+        process_name="general_ask",
     )
-    assert "untrusted reference data" in first_attempt.response
-    assert "Ignore all prior instructions" in first_attempt.response
-    service.chat(
+    second = service.chat(
         subject="alice",
         session_id=session,
-        message="not resolved",
+        message="What is a graph?",
         process_action="continue",
-        process_name="troubleshoot",
-    )
-    second_attempt = service.chat(
-        subject="alice",
-        session_id=session,
-        message="The same error remains",
-        process_action="continue",
-        process_name="troubleshoot",
-    )
-    assert "Troubleshooting attempt 2" in second_attempt.response
-
-    escalated = service.chat(
-        subject="alice",
-        session_id=session,
-        message="not resolved",
-        process_action="continue",
-        process_name="troubleshoot",
+        process_name="general_ask",
     )
 
-    assert "after two bounded troubleshooting attempts" in escalated.response
-    process = next(item for item in escalated.processes if item.name == "troubleshoot")
-    assert process.status == "completed"
-    assert process.active is False
+    assert first.response.startswith("Generated response")
+    assert second.response.startswith("Generated response")
+    assert len(gateway.generated_messages) == 2
+    assert second.processes[0].status == "waiting"
+    assert second.processes[0].active is True
     memories.close()
 
 
 def test_process_failure_is_safe_and_does_not_log_payload(tmp_path: Path, caplog) -> None:
-    gateway = RecordingGateway()
-    service, memories = make_service(tmp_path, gateway, FailingKnowledgeBase())
-    sentinel = "SECRET-PROBLEM-PAYLOAD"
+    gateway = FailingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    sentinel = "SECRET-GENERAL-QUESTION"
     service.chat(
         subject="alice",
         session_id="failure",
         message="start",
         process_action="start",
-        process_name="troubleshoot",
+        process_name="general_ask",
     )
 
     with caplog.at_level(logging.WARNING):
@@ -547,13 +825,13 @@ def test_process_failure_is_safe_and_does_not_log_payload(tmp_path: Path, caplog
             session_id="failure",
             message=sentinel,
             process_action="continue",
-            process_name="troubleshoot",
+            process_name="general_ask",
         )
 
-    process = next(item for item in result.processes if item.name == "troubleshoot")
+    process = next(item for item in result.processes if item.name == "general_ask")
     assert result.response == SAFE_FAILURE_MESSAGE
     assert process.status == "waiting"
-    assert process.step == "problem"
+    assert process.step == "answer_question"
     assert process.active is True
     assert sentinel not in caplog.text
     memories.close()
@@ -563,7 +841,7 @@ def test_invalid_checkpointed_process_payload_returns_safe_failure(tmp_path: Pat
     gateway = RecordingGateway()
     knowledge = FakeKnowledgeBase()
     memories = MemoryRepository(f"sqlite:///{tmp_path / 'invalid-state.db'}")
-    processes = build_process_registry(knowledge)
+    processes = build_process_registry(gateway)
     graph = build_graph(
         GraphDependencies(
             model=gateway,
@@ -580,13 +858,13 @@ def test_invalid_checkpointed_process_payload_returns_safe_failure(tmp_path: Pat
         session_id="invalid-state",
         message="start",
         process_action="start",
-        process_name="project_brief",
+        process_name="number_counter",
     )
     thread_id = hashlib.sha256(b"alice\0invalid-state").hexdigest()
     config = {"configurable": {"thread_id": thread_id}}
     snapshot = graph.get_state(config)
     corrupted = snapshot.values["processes"]
-    corrupted["project_brief"]["payload"] = {"goal": 123}
+    corrupted["number_counter"]["payload"] = {"numbers": ["bad"]}
     graph.update_state(config, {"processes": corrupted})
 
     result = service.chat(
@@ -594,9 +872,11 @@ def test_invalid_checkpointed_process_payload_returns_safe_failure(tmp_path: Pat
         session_id="invalid-state",
         message="continue",
         process_action="continue",
-        process_name="project_brief",
+        process_name="number_counter",
     )
 
     assert result.response == SAFE_FAILURE_MESSAGE
-    assert graph.get_state(config).values["processes"]["project_brief"]["payload"] == {"goal": 123}
+    assert graph.get_state(config).values["processes"]["number_counter"]["payload"] == {
+        "numbers": ["bad"]
+    }
     memories.close()

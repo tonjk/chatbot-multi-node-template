@@ -122,7 +122,11 @@ class ChatNodes:
             return {"error_code": "tool_failed"}
         return {"tool_result": result.content}
 
-    def process_control(self, state: ChatState) -> dict[str, object]:
+    def process_control(
+        self,
+        state: ChatState,
+        runtime: Runtime[GraphContext],
+    ) -> dict[str, object]:
         """Apply deterministic process lifecycle actions before dispatch."""
 
         action = state.get("process_action")
@@ -150,8 +154,22 @@ class ChatNodes:
                 )
             }
 
+        existing = records.get(name)
+        is_auto = runtime.context.process_action == "auto"
+        if is_auto and action in {"start", "continue"}:
+            records = _suspend_records(records, state.get("active_process"), except_name=name)
+            if existing is None or existing.status in {"completed", "cancelled", "failed"}:
+                existing = plugin.start()
+            else:
+                existing = existing.model_copy(update={"status": "waiting"})
+            records[name] = existing
+            return {
+                "processes": _dump_records(records),
+                "active_process": name,
+                "process_should_dispatch": True,
+            }
+
         if action == "start":
-            existing = records.get(name)
             if existing and existing.status in {"waiting", "suspended"}:
                 return {
                     "process_message": (
@@ -168,7 +186,6 @@ class ChatNodes:
                 "process_message": record.prompt,
             }
 
-        existing = records.get(name)
         if existing is None:
             return {"process_message": f"{name} has not been started."}
 
@@ -276,10 +293,14 @@ class ChatNodes:
         """Produce the final answer or a fixed non-sensitive failure."""
 
         if state.get("error_code"):
-            return _response_update(state, SAFE_FAILURE_MESSAGE)
+            return _response_update(state, SAFE_FAILURE_MESSAGE, self._dependencies.processes)
         if state.get("route") == "process":
             answer = state.get("process_message", "").strip() or SAFE_FAILURE_MESSAGE
-            return _response_update(state, answer[:_MAX_RESPONSE_CHARS])
+            return _response_update(
+                state,
+                answer[:_MAX_RESPONSE_CHARS],
+                self._dependencies.processes,
+            )
         try:
             memories = self._dependencies.memories.list_for_subject(
                 runtime.context.subject, limit=10
@@ -295,7 +316,11 @@ class ChatNodes:
         except Exception as error:
             _log_node_failure("respond", error)
             answer = SAFE_FAILURE_MESSAGE
-        return _response_update(state, answer[:_MAX_RESPONSE_CHARS])
+        return _response_update(
+            state,
+            answer[:_MAX_RESPONSE_CHARS],
+            self._dependencies.processes,
+        )
 
 
 def route_after_router(
@@ -345,7 +370,12 @@ def _response_prompt(state: ChatState, memories: list[str]) -> str:
     return "\n\n".join(sections)
 
 
-def _response_update(state: ChatState, answer: str) -> dict[str, object]:
+def _response_update(
+    state: ChatState,
+    answer: str,
+    registry: "ProcessRegistry",
+) -> dict[str, object]:
+    answer = _append_suspended_process_prompt(state, answer, registry)[:_MAX_RESPONSE_CHARS]
     prior_messages = state.get("messages", [])
     removals = [
         RemoveMessage(id=message.id)
@@ -364,6 +394,40 @@ def _response_update(state: ChatState, answer: str) -> dict[str, object]:
         "process_message": "",
         "process_should_dispatch": False,
     }
+
+
+def _append_suspended_process_prompt(
+    state: ChatState,
+    answer: str,
+    registry: "ProcessRegistry",
+) -> str:
+    active_name = state.get("active_process")
+    if active_name is not None:
+        active_plugin = registry.get(active_name)
+        if active_plugin is None or not active_plugin.yields_to_suspended_reminders:
+            return answer
+    try:
+        suspended = sorted(
+            record.name
+            for record in _process_records(state).values()
+            if record.status == "suspended"
+        )
+    except Exception:
+        return answer
+    if not suspended:
+        return answer
+    if len(suspended) == 1:
+        reminder = (
+            f"You have a suspended '{suspended[0]}' process. "
+            "Would you like to continue or cancel it?"
+        )
+    else:
+        names = ", ".join(f"'{name}'" for name in suspended)
+        reminder = (
+            f"You have suspended processes: {names}. "
+            "Reply with 'continue <process>' or 'cancel <process>'."
+        )
+    return answer.rstrip() + "\n\n" + reminder
 
 
 def _routing_context(state: ChatState, registry: "ProcessRegistry") -> str:

@@ -107,9 +107,9 @@ when required, `process_name`:
 ```json
 {
   "session_id": "demo-session",
-  "message": "Start a project brief",
+  "message": "Start counting numbers",
   "process_action": "start",
-  "process_name": "project_brief"
+  "process_name": "number_counter"
 }
 ```
 
@@ -123,7 +123,7 @@ Explicit actions bypass AI routing. The supported actions are:
 | `switch` | Activate an unfinished process and repeat its saved prompt without consuming `message`. |
 | `cancel` | Cancel an unfinished process. |
 | `status` | Report one named process or all processes started in the session. |
-| `auto` | Let the validated model router select chat, retrieval, a tool, or process control. |
+| `auto` | Let the validated model router select chat, retrieval, a tool, or process control. AI-routed process input starts or reactivates the process and is consumed in the same turn. |
 
 Chat responses include a bounded `processes` list containing only each process name, status,
 public step, and active flag. Internal process payloads are checkpointed but never returned or
@@ -131,9 +131,14 @@ included in router context.
 
 ## Process plug-ins
 
-The built-in `project_brief` process collects a goal, audience, and constraints, supports up to
-three review revisions, and completes on approval. The built-in `troubleshoot` process uses the
-shared knowledge interface as untrusted reference data and stops after two unsuccessful attempts.
+The registered processes are:
+
+- `number_counter` uses bounded structured model output to extract numbers (including written
+  number words), stores up to five values across one or more messages, and reports their sum.
+- `color_note` uses bounded structured model output instead of a fixed color-name list, stores three
+  unique normalized colors across one or more messages, then summarizes them in mention order.
+- `general_ask` sends only the current question to the configured AI model with a two-sentence
+  answer limit. It does not call Chroma, the shared knowledge interface, or another tool.
 
 Each plug-in is reviewed Python code registered once during application startup. A plug-in owns a
 Pydantic payload model, an initial step and prompt, and a stateless compiled child graph. The parent
@@ -141,6 +146,11 @@ graph stores the validated process record in its subject/session-scoped checkpoi
 can be suspended while another capability runs and later resume at the exact saved step. Runtime
 workflow uploads, parallel process execution, arbitrary tools, and `interrupt()` are intentionally
 not supported.
+
+When a turn ends with no blocking process active but a suspended process remains, the response asks
+whether the user wants to continue or cancel it. GeneralAsk is passive after answering, so it also
+yields this reminder. A short `continue` reply re-presents the saved prompt without consuming the
+reply as workflow data; `cancel` terminates the suspended process.
 
 `memory_consent` defaults to `false` on every request. A previously consented turn cannot make consent sticky because consent is supplied through non-persisted runtime context and checked again by the memory repository.
 
@@ -179,9 +189,9 @@ uv run ruff format --check .
 ```
 
 Tests cover JWT validation, checkpoint isolation, per-turn memory consent, memory ownership/deletion,
-router failure, retrieval injection boundaries, tool validation, process switching and lifecycle
-limits, SQLite process resumption, JSON-log safety, API contracts, and Chroma indexing. They do not
-require OpenAI credentials or network calls.
+router failure, retrieval injection boundaries, tool validation, number and color accumulation,
+model-only general answers, process switching, SQLite process resumption, JSON-log safety, API
+contracts, and Chroma indexing. They do not require OpenAI credentials or network calls.
 
 ## Docker Compose
 

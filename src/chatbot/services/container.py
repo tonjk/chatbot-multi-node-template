@@ -59,7 +59,7 @@ def build_container(settings: Settings) -> AppContainer:
         )
         model = OpenAIModelGateway(settings)
         tools = ToolRegistry(knowledge_base=knowledge_base)
-        processes = build_process_registry(knowledge_base)
+        processes = build_process_registry(model)
         graph = build_graph(
             GraphDependencies(
                 model=model,
