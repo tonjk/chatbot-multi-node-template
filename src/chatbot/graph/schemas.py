@@ -6,7 +6,12 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chatbot.memory.schemas import MemoryCandidate
-from chatbot.processes.schemas import ProcessControlAction, ProcessModel, ProcessView
+from chatbot.processes.schemas import (
+    ProcessControlAction,
+    ProcessDirective,
+    ProcessModel,
+    ProcessView,
+)
 
 RouteName = Literal["chat", "retrieve", "tools", "process"]
 ToolName = Literal["calculator", "current_time", "knowledge_search"]
@@ -25,6 +30,7 @@ class RouteDecision(BaseModel):
         max_length=64,
         pattern=r"^[a-z][a-z0-9_]{0,63}$",
     )
+    process_directives: list[ProcessDirective] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode="after")
     def validate_tool_fields(self) -> "RouteDecision":
@@ -36,11 +42,24 @@ class RouteDecision(BaseModel):
         elif self.tool_name is not None or self.tool_input is not None:
             raise ValueError("Only tool routes may include tool fields")
         if self.route == "process":
-            if self.process_action is None:
-                raise ValueError("Process routes require a process action")
-            if self.process_action != "status" and self.process_name is None:
-                raise ValueError("This process action requires a process name")
-        elif self.process_action is not None or self.process_name is not None:
+            if self.process_directives:
+                if len(self.process_directives) < 2:
+                    raise ValueError("Multi-process routes require at least two directives")
+                if self.process_action is not None or self.process_name is not None:
+                    raise ValueError("Multi-process routes cannot include single-process fields")
+                names = [directive.process_name for directive in self.process_directives]
+                if len(names) != len(set(names)):
+                    raise ValueError("Multi-process routes require unique process names")
+            else:
+                if self.process_action is None:
+                    raise ValueError("Process routes require a process action")
+                if self.process_action != "status" and self.process_name is None:
+                    raise ValueError("This process action requires a process name")
+        elif (
+            self.process_action is not None
+            or self.process_name is not None
+            or self.process_directives
+        ):
             raise ValueError("Only process routes may include process fields")
         return self
 

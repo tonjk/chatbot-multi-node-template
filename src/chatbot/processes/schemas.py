@@ -17,24 +17,68 @@ ProcessStatus = Literal["waiting", "suspended", "completed", "cancelled", "faile
 _PROCESS_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _MAX_PAYLOAD_BYTES = 12_000
 _BoundedInteger = Annotated[int, Field(ge=-1_000_000_000, le=1_000_000_000)]
+_ColorName = Annotated[str, Field(min_length=1, max_length=40)]
+
+
+class ProcessDirective(BaseModel):
+    """One bounded process target in an AI-selected multi-process turn."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    process_action: Literal["start", "continue"]
+    process_name: str = Field(max_length=64, pattern=_PROCESS_NAME_PATTERN)
+
+
+class NumberAction(BaseModel):
+    """One ordered mutation extracted from a number-counter message."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["add", "remove", "edit"]
+    value: _BoundedInteger
+    replacement: _BoundedInteger | None
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> "NumberAction":
+        if self.action == "edit" and self.replacement is None:
+            raise ValueError("Edit actions require a replacement")
+        if self.action != "edit" and self.replacement is not None:
+            raise ValueError("Only edit actions may include a replacement")
+        return self
 
 
 class NumberExtraction(BaseModel):
-    """Bounded structured output for numbers mentioned in one user message."""
+    """Bounded ordered number mutations extracted from one user message."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    numbers: list[_BoundedInteger] = Field(max_length=20)
+    actions: list[NumberAction] = Field(max_length=20)
+
+
+class ColorAction(BaseModel):
+    """One ordered mutation extracted from a color-note message."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["add", "remove", "edit"]
+    value: _ColorName
+    replacement: _ColorName | None
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> "ColorAction":
+        if self.action == "edit" and self.replacement is None:
+            raise ValueError("Edit actions require a replacement")
+        if self.action != "edit" and self.replacement is not None:
+            raise ValueError("Only edit actions may include a replacement")
+        return self
 
 
 class ColorExtraction(BaseModel):
-    """Bounded structured output for colors mentioned in one user message."""
+    """Bounded ordered color mutations extracted from one user message."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    colors: list[Annotated[str, Field(min_length=1, max_length=40)]] = Field(
-        max_length=20,
-    )
+    actions: list[ColorAction] = Field(max_length=20)
 
 
 class ProcessModel(Protocol):

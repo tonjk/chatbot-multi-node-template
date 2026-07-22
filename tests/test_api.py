@@ -34,6 +34,18 @@ class FakeGateway:
         self.number_extraction_messages: list[str] = []
 
     def decide_route(self, message: str, process_context: str) -> RouteDecision:
+        if message == "Add number 10 and add Red":
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action=None,
+                process_name=None,
+                process_directives=[
+                    {"process_action": "start", "process_name": "number_counter"},
+                    {"process_action": "start", "process_name": "color_note"},
+                ],
+            )
         if message == "My first number is seven":
             return RouteDecision(
                 route="process",
@@ -69,7 +81,7 @@ class FakeGateway:
     def generate(self, messages: list[BaseMessage]) -> str:
         return "Hello from the graph"
 
-    def extract_numbers(self, message: str) -> dict[str, list[int]]:
+    def extract_numbers(self, message: str) -> dict[str, list[dict[str, object]]]:
         self.number_extraction_messages.append(message)
         values = {
             "My first value is seven": [7],
@@ -78,15 +90,25 @@ class FakeGateway:
             "Remember 8": [8],
             "Remember 9": [9],
         }
-        return {"numbers": values.get(message, [])}
+        numbers = values.get(message, [])
+        if message == "Add number 10 and add Red":
+            numbers = [10]
+        return {
+            "actions": [{"action": "add", "value": value, "replacement": None} for value in numbers]
+        }
 
-    def extract_colors(self, message: str) -> dict[str, list[str]]:
+    def extract_colors(self, message: str) -> dict[str, list[dict[str, object]]]:
         values = {
             "BLUE, blue, grey, then red": ["blue", "blue", "gray", "red"],
             "My first color is chartreuse": ["chartreuse"],
             "My favorite color is chartreuse": ["chartreuse"],
         }
-        return {"colors": values.get(message, [])}
+        colors = values.get(message, [])
+        if message == "Add number 10 and add Red":
+            colors = ["red"]
+        return {
+            "actions": [{"action": "add", "value": value, "replacement": None} for value in colors]
+        }
 
     def extract_memory(self, message: str) -> MemoryCandidate:
         return MemoryCandidate(
@@ -445,6 +467,48 @@ def test_auto_routed_first_color_starts_process_and_consumes_message(tmp_path: P
         assert response.json()["response"] == "Please input 2 more colors."
         assert response.json()["processes"][0]["name"] == "color_note"
         assert response.json()["processes"][0]["active"] is True
+    container.close()
+
+
+def test_auto_routed_message_can_update_two_processes(tmp_path: Path) -> None:
+    container = make_container(tmp_path)
+    app = create_app(container=container)
+    with TestClient(app) as client:
+        headers = authenticate(client)
+
+        response = client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "session_id": "multi-process-message",
+                "message": "Add number 10 and add Red",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": "multi-process-message",
+            "response": (
+                "NumberCounter: Please input 4 more numbers.\n"
+                "ColorNote: Please input 2 more colors."
+            ),
+            "route": "process",
+            "correlation_id": response.json()["correlation_id"],
+            "processes": [
+                {
+                    "name": "number_counter",
+                    "status": "suspended",
+                    "step": "collect_numbers",
+                    "active": False,
+                },
+                {
+                    "name": "color_note",
+                    "status": "waiting",
+                    "step": "collect_colors",
+                    "active": True,
+                },
+            ],
+        }
     container.close()
 
 

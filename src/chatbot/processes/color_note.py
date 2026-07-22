@@ -29,7 +29,9 @@ def build_color_note_plugin(model: ProcessModel) -> ProcessPlugin:
     builder.add_edge("collect_colors", END)
     return ProcessPlugin(
         name="color_note",
-        description="Collect three unique color names from user text and summarize them.",
+        description=(
+            "Add, remove, or edit up to three unique colors from user text and summarize them."
+        ),
         state_model=ColorNoteState,
         initial_state=ColorNoteState,
         initial_step="collect_colors",
@@ -44,12 +46,21 @@ def _collect_colors(model: ProcessModel):
         message = str(state.get("message", ""))[:4_000]
         extraction = ColorExtraction.model_validate(model.extract_colors(message))
         colors = list(payload.colors)
-        for mentioned in extraction.colors:
-            color = _normalize(mentioned)
-            if color not in colors:
-                colors.append(color)
-            if len(colors) == 3:
-                break
+        for action in extraction.actions:
+            color = _normalize(action.value)
+            if action.action == "add":
+                if color not in colors and len(colors) < 3:
+                    colors.append(color)
+            elif action.action == "remove":
+                if color in colors:
+                    colors.remove(color)
+            elif color in colors and action.replacement is not None:
+                replacement = _normalize(action.replacement)
+                index = colors.index(color)
+                if replacement in colors and replacement != color:
+                    colors.pop(index)
+                else:
+                    colors[index] = replacement
         updated = ColorNoteState(colors=colors)
         if len(colors) == 3:
             return {

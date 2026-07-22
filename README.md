@@ -133,12 +133,18 @@ included in router context.
 
 The registered processes are:
 
-- `number_counter` uses bounded structured model output to extract numbers (including written
-  number words), stores up to five values across one or more messages, and reports their sum.
-- `color_note` uses bounded structured model output instead of a fixed color-name list, stores three
-  unique normalized colors across one or more messages, then summarizes them in mention order.
+- `number_counter` uses bounded structured model output to extract ordered add, remove, and edit
+  actions (including written number words), stores up to five values, and reports their sum.
+- `color_note` uses bounded structured model output instead of a fixed color-name list to add,
+  remove, or edit up to three unique normalized colors, then summarizes them in mention order.
 - `general_ask` sends only the current question to the configured AI model with a two-sentence
   answer limit. It does not call Chroma, the shared knowledge interface, or another tool.
+
+One auto-routed message may target multiple registered processes, such as `Add number 10 and add
+Red`. The router returns a bounded, validated directive for each process, and the parent graph
+advances them sequentially with the same message. The response reports each process result; only
+the last process that still needs input remains active, while other unfinished processes are
+suspended with their validated payloads intact.
 
 Each plug-in is reviewed Python code registered once during application startup. A plug-in owns a
 Pydantic payload model, an initial step and prompt, and a stateless compiled child graph. The parent

@@ -21,6 +21,7 @@ class ChatState(MessagesState, total=False):
     active_process: str | None
     process_action: ProcessControlAction | None
     process_name: str | None
+    process_directives: list[dict[str, Any]]
     process_message: str
     process_should_dispatch: bool
 

@@ -5,8 +5,8 @@ from chatbot.processes.registry import ProcessRegistry
 
 
 class FakeProcessModel:
-    def extract_numbers(self, message: str) -> dict[str, list[int]]:
-        return {"numbers": []}
+    def extract_numbers(self, message: str) -> dict[str, list[dict[str, object]]]:
+        return {"actions": []}
 
 
 def test_process_registry_rejects_duplicate_names() -> None:

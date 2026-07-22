@@ -52,6 +52,34 @@ class RecordingGateway:
     ) -> RouteDecision | dict[str, Any]:
         self.route_calls += 1
         self.route_contexts.append(process_context)
+        if message == "Add number 10 and add Red":
+            return {
+                "route": "process",
+                "tool_name": None,
+                "tool_input": None,
+                "process_action": None,
+                "process_name": None,
+                "process_directives": [
+                    {"process_action": "start", "process_name": "number_counter"},
+                    {"process_action": "start", "process_name": "color_note"},
+                ],
+            }
+        if message == "Change stored number 5 to 50":
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="continue",
+                process_name="number_counter",
+            )
+        if message == "Remove stored red":
+            return RouteDecision(
+                route="process",
+                tool_name=None,
+                tool_input=None,
+                process_action="continue",
+                process_name="color_note",
+            )
         if message == "continue" and "number_counter: suspended" in process_context:
             return RouteDecision(
                 route="process",
@@ -114,19 +142,63 @@ class RecordingGateway:
         self.generated_messages.append(messages)
         return "Generated response"
 
-    def extract_numbers(self, message: str) -> dict[str, list[int]]:
+    def extract_numbers(self, message: str) -> dict[str, list[dict[str, object]]]:
         self.number_extraction_messages.append(message)
+        if message == "Remove 2, change 3 to 30, then add 4, 5, and 6":
+            return {
+                "actions": [
+                    {"action": "remove", "value": 2, "replacement": None},
+                    {"action": "edit", "value": 3, "replacement": 30},
+                    {"action": "add", "value": 4, "replacement": None},
+                    {"action": "add", "value": 5, "replacement": None},
+                    {"action": "add", "value": 6, "replacement": None},
+                ]
+            }
+        if message == "Change stored number 5 to 50":
+            return {
+                "actions": [
+                    {"action": "edit", "value": 5, "replacement": 50},
+                ]
+            }
         numbers = re.findall(r"(?<![\w.])[+-]?\d+(?![\w.])", message)
-        return {"numbers": [int(value) for value in numbers]}
+        return {
+            "actions": [
+                {"action": "add", "value": int(value), "replacement": None} for value in numbers
+            ]
+        }
 
-    def extract_colors(self, message: str) -> dict[str, list[str]]:
+    def extract_colors(self, message: str) -> dict[str, list[dict[str, object]]]:
         self.color_extraction_messages.append(message)
+        if message == "Remove red, change blue to teal, then add green and gold":
+            return {
+                "actions": [
+                    {"action": "remove", "value": "red", "replacement": None},
+                    {"action": "edit", "value": "blue", "replacement": "teal"},
+                    {"action": "add", "value": "green", "replacement": None},
+                    {"action": "add", "value": "gold", "replacement": None},
+                ]
+            }
+        if message == "Remove stored red":
+            return {
+                "actions": [
+                    {"action": "remove", "value": "red", "replacement": None},
+                ]
+            }
         names = re.findall(
             r"\b(?:blue|red|green|gray|grey|chartreuse)\b",
             message,
             flags=re.IGNORECASE,
         )
-        return {"colors": ["gray" if value.casefold() == "grey" else value for value in names]}
+        return {
+            "actions": [
+                {
+                    "action": "add",
+                    "value": "gray" if value.casefold() == "grey" else value,
+                    "replacement": None,
+                }
+                for value in names
+            ]
+        }
 
     def extract_memory(self, message: str) -> MemoryCandidate:
         self.memory_calls += 1
@@ -609,6 +681,40 @@ def test_number_counter_stores_five_values_and_reports_their_sum(tmp_path: Path)
     memories.close()
 
 
+def test_number_counter_applies_add_remove_and_edit_actions_in_message_order(
+    tmp_path: Path,
+) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "number-counter-actions"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Add 1, 2, and 3",
+        process_action="continue",
+        process_name="number_counter",
+    )
+
+    result = service.chat(
+        subject="alice",
+        session_id=session,
+        message="Remove 2, change 3 to 30, then add 4, 5, and 6",
+        process_action="continue",
+        process_name="number_counter",
+    )
+
+    assert result.response == "Stored numbers: 1, 30, 4, 5, 6. Total: 46."
+    assert result.processes[0].status == "completed"
+    memories.close()
+
+
 def test_color_note_collects_three_unique_colors_case_insensitively(tmp_path: Path) -> None:
     gateway = RecordingGateway()
     service, memories = make_service(tmp_path, gateway)
@@ -640,6 +746,124 @@ def test_color_note_collects_three_unique_colors_case_insensitively(tmp_path: Pa
     assert completed.response == "Collected colors: blue, red, green."
     assert completed.processes[0].status == "completed"
     assert completed.processes[0].active is False
+    memories.close()
+
+
+def test_color_note_applies_add_remove_and_edit_actions_in_message_order(
+    tmp_path: Path,
+) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "color-note-actions"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="color_note",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="Add red and blue",
+        process_action="continue",
+        process_name="color_note",
+    )
+
+    result = service.chat(
+        subject="alice",
+        session_id=session,
+        message="Remove red, change blue to teal, then add green and gold",
+        process_action="continue",
+        process_name="color_note",
+    )
+
+    assert result.response == "Collected colors: teal, green, gold."
+    assert result.processes[0].status == "completed"
+    memories.close()
+
+
+def test_one_message_can_update_number_counter_and_color_note(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+
+    result = service.chat(
+        subject="alice",
+        session_id="multi-process-actions",
+        message="Add number 10 and add Red",
+    )
+
+    assert result.route == "process"
+    assert result.response == (
+        "NumberCounter: Please input 4 more numbers.\nColorNote: Please input 2 more colors."
+    )
+    assert [(process.name, process.status, process.active) for process in result.processes] == [
+        ("number_counter", "suspended", False),
+        ("color_note", "waiting", True),
+    ]
+    assert gateway.number_extraction_messages == ["Add number 10 and add Red"]
+    assert gateway.color_extraction_messages == ["Add number 10 and add Red"]
+    memories.close()
+
+
+def test_agent_can_edit_a_completed_number_counter(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "edit-completed-counter"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="number_counter",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="1 2 3 4 5",
+        process_action="continue",
+        process_name="number_counter",
+    )
+
+    result = service.chat(
+        subject="alice",
+        session_id=session,
+        message="Change stored number 5 to 50",
+    )
+
+    assert result.response == "Stored numbers: 1, 2, 3, 4, 50. Total: 60."
+    assert result.processes[0].status == "completed"
+    memories.close()
+
+
+def test_agent_can_remove_from_a_completed_color_note(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    service, memories = make_service(tmp_path, gateway)
+    session = "remove-completed-color"
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="start",
+        process_action="start",
+        process_name="color_note",
+    )
+    service.chat(
+        subject="alice",
+        session_id=session,
+        message="red blue green",
+        process_action="continue",
+        process_name="color_note",
+    )
+
+    result = service.chat(
+        subject="alice",
+        session_id=session,
+        message="Remove stored red",
+    )
+
+    assert result.response == "Please input 1 more color."
+    assert result.processes[0].status == "waiting"
+    assert result.processes[0].active is True
     memories.close()
 
 

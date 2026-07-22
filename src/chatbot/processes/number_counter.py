@@ -29,7 +29,9 @@ def build_number_counter_plugin(model: ProcessModel) -> ProcessPlugin:
     builder.add_edge("collect_numbers", END)
     return ProcessPlugin(
         name="number_counter",
-        description="Collect five integer values from user text and report their arithmetic sum.",
+        description=(
+            "Add, remove, or edit up to five integer values from user text and report their sum."
+        ),
         state_model=NumberCounterState,
         initial_state=NumberCounterState,
         initial_step="collect_numbers",
@@ -43,8 +45,16 @@ def _collect_numbers(model: ProcessModel):
         payload = NumberCounterState.model_validate(state.get("payload", {}))
         message = str(state.get("message", ""))[:4_000]
         extraction = NumberExtraction.model_validate(model.extract_numbers(message))
-        remaining = 5 - len(payload.numbers)
-        numbers = [*payload.numbers, *extraction.numbers[:remaining]]
+        numbers = list(payload.numbers)
+        for action in extraction.actions:
+            if action.action == "add":
+                if len(numbers) < 5:
+                    numbers.append(action.value)
+            elif action.action == "remove":
+                if action.value in numbers:
+                    numbers.remove(action.value)
+            elif action.value in numbers and action.replacement is not None:
+                numbers[numbers.index(action.value)] = action.replacement
         payload = NumberCounterState(numbers=numbers)
         if len(numbers) == 5:
             rendered = ", ".join(str(value) for value in numbers)

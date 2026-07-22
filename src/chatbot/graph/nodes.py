@@ -9,7 +9,7 @@ from langgraph.runtime import Runtime
 from chatbot.graph.schemas import RouteDecision, RouteName
 from chatbot.graph.state import ChatState, GraphContext
 from chatbot.memory.schemas import MemoryCandidate
-from chatbot.processes.schemas import ProcessControlAction, ProcessRecord
+from chatbot.processes.schemas import ProcessControlAction, ProcessDirective, ProcessRecord
 from chatbot.tools.registry import ToolValidationError
 
 if TYPE_CHECKING:
@@ -44,6 +44,7 @@ class ChatNodes:
             "error_code": None,
             "process_action": None,
             "process_name": None,
+            "process_directives": [],
             "process_message": "",
             "process_should_dispatch": False,
         }
@@ -76,6 +77,9 @@ class ChatNodes:
                 "tool_arguments": decision.as_tool_arguments(),
                 "process_action": decision.process_action,
                 "process_name": decision.process_name,
+                "process_directives": [
+                    directive.model_dump(mode="json") for directive in decision.process_directives
+                ],
             }
         )
         if decision.route != "process":
@@ -137,6 +141,53 @@ class ChatNodes:
             _log_node_failure("process_control", error)
             return {"error_code": "process_state_failed"}
 
+        raw_directives = state.get("process_directives", [])
+        if raw_directives:
+            try:
+                directives = [
+                    ProcessDirective.model_validate(directive) for directive in raw_directives
+                ]
+            except Exception as error:
+                _log_node_failure("process_control", error)
+                return {"error_code": "process_state_failed"}
+            unknown = next(
+                (
+                    directive.process_name
+                    for directive in directives
+                    if self._dependencies.processes.get(directive.process_name) is None
+                ),
+                None,
+            )
+            if unknown is not None:
+                return {
+                    "process_message": _unknown_process_message(
+                        unknown,
+                        self._dependencies.processes.names,
+                    )
+                }
+            selected_names = {directive.process_name for directive in directives}
+            if state.get("active_process") not in selected_names:
+                records = _suspend_records(records, state.get("active_process"))
+            for directive in directives:
+                plugin = self._dependencies.processes.get(directive.process_name)
+                if plugin is None:  # Guarded above; keeps type narrowing explicit.
+                    return {"error_code": "process_state_failed"}
+                existing = records.get(directive.process_name)
+                if (
+                    existing is None
+                    or existing.status in {"cancelled", "failed"}
+                    or (directive.process_action == "start" and existing.status == "completed")
+                ):
+                    record = plugin.start()
+                else:
+                    record = existing.model_copy(update={"status": "waiting"})
+                records[directive.process_name] = record
+            return {
+                "processes": _dump_records(records),
+                "active_process": directives[-1].process_name,
+                "process_should_dispatch": True,
+            }
+
         if action == "status":
             selected = records.get(name) if name else None
             if name and selected is None:
@@ -158,7 +209,11 @@ class ChatNodes:
         is_auto = runtime.context.process_action == "auto"
         if is_auto and action in {"start", "continue"}:
             records = _suspend_records(records, state.get("active_process"), except_name=name)
-            if existing is None or existing.status in {"completed", "cancelled", "failed"}:
+            if (
+                existing is None
+                or existing.status in {"cancelled", "failed"}
+                or (action == "start" and existing.status == "completed")
+            ):
                 existing = plugin.start()
             else:
                 existing = existing.model_copy(update={"status": "waiting"})
@@ -235,7 +290,47 @@ class ChatNodes:
         return {"process_message": "Unsupported process action."}
 
     def process_dispatch(self, state: ChatState) -> dict[str, object]:
-        """Advance exactly one validated process from its checkpointed record."""
+        """Advance one or more validated processes from checkpointed records."""
+
+        raw_directives = state.get("process_directives", [])
+        if raw_directives:
+            try:
+                directives = [
+                    ProcessDirective.model_validate(directive) for directive in raw_directives
+                ]
+                records = _process_records(state)
+                messages: list[str] = []
+                for directive in directives:
+                    name = directive.process_name
+                    plugin = self._dependencies.processes.get(name)
+                    if plugin is None or name not in records:
+                        raise ValueError("Process dispatch target is not registered")
+                    record = plugin.advance(records[name], _latest_user_text(state))
+                    records[name] = record
+                    messages.append(f"{_process_label(name)}: {_record_message(name, record)}")
+            except Exception as error:
+                _log_node_failure("process_dispatch", error)
+                return {"error_code": "process_failed"}
+
+            active_name = next(
+                (
+                    directive.process_name
+                    for directive in reversed(directives)
+                    if records[directive.process_name].status == "waiting"
+                ),
+                None,
+            )
+            for directive in directives:
+                name = directive.process_name
+                record = records[name]
+                if record.status == "waiting" and name != active_name:
+                    records[name] = record.model_copy(update={"status": "suspended"})
+            return {
+                "processes": _dump_records(records),
+                "active_process": active_name,
+                "process_message": "\n".join(messages),
+                "process_should_dispatch": False,
+            }
 
         name = state.get("process_name")
         plugin = self._dependencies.processes.get(name or "")
@@ -249,12 +344,7 @@ class ChatNodes:
             return {"error_code": "process_failed"}
         records[name] = record
         is_active = record.status in {"waiting", "suspended"}
-        if record.status == "completed":
-            message = record.result or f"Completed {name}."
-        elif record.status == "failed":
-            message = SAFE_FAILURE_MESSAGE
-        else:
-            message = record.prompt
+        message = _record_message(name, record)
         return {
             "processes": _dump_records(records),
             "active_process": name if is_active else None,
@@ -391,6 +481,7 @@ def _response_update(
         "tool_name": None,
         "process_action": None,
         "process_name": None,
+        "process_directives": [],
         "process_message": "",
         "process_should_dispatch": False,
     }
@@ -507,6 +598,18 @@ def _process_status_message(
     return "Process status: " + "; ".join(
         f"{record.name} is {record.status} at {record.step}" for record in records.values()
     )
+
+
+def _record_message(name: str, record: ProcessRecord) -> str:
+    if record.status == "completed":
+        return record.result or f"Completed {name}."
+    if record.status == "failed":
+        return SAFE_FAILURE_MESSAGE
+    return record.prompt
+
+
+def _process_label(name: str) -> str:
+    return "".join(part.capitalize() for part in name.split("_"))
 
 
 def _log_node_failure(node: str, error: Exception) -> None:

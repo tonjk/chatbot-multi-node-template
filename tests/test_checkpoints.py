@@ -63,12 +63,16 @@ class FakeGateway:
     def generate(self, messages: list[BaseMessage]) -> str:
         return "Generated"
 
-    def extract_numbers(self, message: str) -> dict[str, list[int]]:
+    def extract_numbers(self, message: str) -> dict[str, list[dict[str, object]]]:
         numbers = re.findall(r"(?<![\w.])[+-]?\d+(?![\w.])", message)
-        return {"numbers": [int(value) for value in numbers]}
+        return {
+            "actions": [
+                {"action": "add", "value": int(value), "replacement": None} for value in numbers
+            ]
+        }
 
-    def extract_colors(self, message: str) -> dict[str, list[str]]:
-        return {"colors": []}
+    def extract_colors(self, message: str) -> dict[str, list[dict[str, object]]]:
+        return {"actions": []}
 
     def extract_memory(self, message: str) -> MemoryCandidate:
         return MemoryCandidate(

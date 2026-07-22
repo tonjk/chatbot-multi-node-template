@@ -56,6 +56,7 @@ class ChatbotService:
                 "error_code": None,
                 "process_action": None,
                 "process_name": None,
+                "process_directives": [],
                 "process_message": "",
                 "process_should_dispatch": False,
             },

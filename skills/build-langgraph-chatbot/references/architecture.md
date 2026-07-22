@@ -45,9 +45,9 @@ tool, or process failures go directly to a fixed safe response.
 | Retrieval | Index application-owned Markdown via an explicit CLI command. Treat all returned text as untrusted reference data. |
 | Tools | Register calculator, current-time, and knowledge-search explicitly; validate Pydantic arguments and bound results. |
 | Processes | Register reviewed code plug-ins at startup. Persist one bounded, validated record per plug-in in the parent subject/session checkpoint. Only one process may be active at a time. A plug-in may declare that its active waiting state yields to suspended-process reminders. |
-| Process routing | Explicit API actions override AI routing. Pass only trusted plug-in descriptions and status/step metadata to the router, never collected process payloads. |
+| Process routing | Explicit API actions override AI routing. Pass only trusted plug-in descriptions and status/step metadata to the router, never collected process payloads. AI routing may return two to five unique process directives for one message; dispatch them sequentially and leave at most one active. |
 | Suspended process reminder | When no blocking process is active, append a bounded reminder for suspended processes. GeneralAsk yields reminders after answering. A short `continue` switches to the sole suspended process without consuming the control reply; `cancel` cancels it. Never resume automatically. |
-| Built-in processes | `number_counter` uses bounded structured model extraction and sums five stored integers, `color_note` uses bounded structured model extraction and summarizes three unique colors, and `general_ask` returns short model-only answers without retrieval. Number and color inputs may accumulate across messages or arrive together in one message. |
+| Built-in processes | `number_counter` uses bounded structured model extraction to add, remove, or edit five stored integers and report their sum; `color_note` similarly mutates and summarizes three unique colors; `general_ask` returns short model-only answers without retrieval. One message may carry ordered actions for both collectors. |
 | Observability | Emit JSON logs with validated request IDs; never serialize bodies, secrets, retrieved text, or memory values. |
 
 ## Performance boundaries
